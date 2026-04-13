@@ -1,10 +1,3 @@
-// -*-c++-*-
-
-/*
- * Copyright: Hidehisa AKIYAMA
- * Modified for DQN integration
- */
-
 #ifndef SAMPLE_PLAYER_H
 #define SAMPLE_PLAYER_H
 
@@ -21,7 +14,6 @@
 #include <vector>
 #include <memory>
 
-// Forward declarations
 class DQNBridge;
 
 class SamplePlayer
@@ -69,7 +61,7 @@ protected:
 
 private:
 
-    // Ленивая инициализация DQN (вызывается при первом такте PlayOn)
+    // Инициализация DQN (вызывается при первом такте PlayOn)
     void initDQNIfNeeded();
 
     // Условие досрочного завершения макро-действия

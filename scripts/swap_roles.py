@@ -9,7 +9,7 @@ BASE_PATHS = [
 FOLDERS = ["formations-dt", "formations-keeper", "formations-taker"]
 
 AGENT_A = "2"
-AGENT_B = "11"
+AGENT_B = "3"
 
 def swap_roles():
     count = 0

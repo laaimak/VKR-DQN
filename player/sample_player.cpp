@@ -66,7 +66,6 @@ static const std::string DQN_MODULE_DIR  = "/Users/laaimak/Desktop/VKR/python_dq
 // Вратарь управляется FSM helios
 static const int GOALIE_UNUM = 1;
 
-
 SamplePlayer::SamplePlayer()
     : PlayerAgent()
     , M_communication()
@@ -150,10 +149,9 @@ bool SamplePlayer::initImpl(CmdLineParser& cmd_parser)
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// Ленивая инициализация DQN Bridge
+// Инициализация DQN Bridge
 // Вызывается при первом такте PlayOn чтобы знать unum агента
-// ---------------------------------------------------------------------------
+
 void SamplePlayer::initDQNIfNeeded()
 {
     if (M_dqn_bridge) return;
@@ -181,9 +179,8 @@ void SamplePlayer::initDQNIfNeeded()
     }
 }
 
-// ---------------------------------------------------------------------------
 // Условия досрочного завершения макро-действия
-// ---------------------------------------------------------------------------
+
 bool SamplePlayer::isMacroActionDone(const WorldModel& wm) const
 {
     switch (M_current_macro_action) {
@@ -226,9 +223,8 @@ bool SamplePlayer::isMacroActionDone(const WorldModel& wm) const
     }
 }
 
-// ---------------------------------------------------------------------------
 // Максимальная длительность каждого макро-действия (в тактах)
-// ---------------------------------------------------------------------------
+
 int SamplePlayer::getMaxTau(int action) const
 {
     switch (action) {
@@ -244,9 +240,8 @@ int SamplePlayer::getMaxTau(int action) const
     }
 }
 
-// ---------------------------------------------------------------------------
 // Выполнение макро-действия
-// ---------------------------------------------------------------------------
+
 void SamplePlayer::executeMacroAction(int action)
 {
     const WorldModel& wm = world();
@@ -327,9 +322,8 @@ void SamplePlayer::executeMacroAction(int action)
         
 }
 
-// ---------------------------------------------------------------------------
 // Главный цикл принятия решений
-// ---------------------------------------------------------------------------
+
 void SamplePlayer::actionImpl()
 {
     if (this->audioSensor().trainerMessageTime() == world().time()) {
@@ -385,12 +379,10 @@ void SamplePlayer::actionImpl()
         return;
     }
 
-    // =======================================================================
     // DQN управление полевыми игроками в режиме PlayOn
-    // =======================================================================
     if (world().gameMode().type() == GameMode::PlayOn) {
 
-        // Ленивая инициализация DQN при первом такте
+        // Инициализация DQN при первом такте
         initDQNIfNeeded();
 
         // Если DQN недоступен — fallback на helios FSM
@@ -410,12 +402,9 @@ void SamplePlayer::actionImpl()
         Vector2D target_pos =
             StateBuilder::getTargetPosition(wm, tactical_pos);
 
-        // Конец матча
         bool done = (wm.time().cycle() >= 6000);
 
-        // -------------------------------------------------------------------
         // Проверяем завершение текущего макро-действия
-        // -------------------------------------------------------------------
         bool macro_done = !M_macro_active
             || isMacroActionDone(wm)
             || (M_macro_action_timer >= getMaxTau(M_current_macro_action));
@@ -463,7 +452,6 @@ void SamplePlayer::actionImpl()
         executeMacroAction(M_current_macro_action);
 
         // Обрабатываем конец матча
-        // Обрабатываем конец матча
         if (done) {
             int tau = 0;
             double final_reward = M_reward_evaluator->getFinalRewardAndReset(tau);
@@ -486,9 +474,7 @@ void SamplePlayer::actionImpl()
         return;
     }
 
-    // =======================================================================
     // Прочие режимы (penalty kick, set play)
-    // =======================================================================
     if (world().gameMode().isPenaltyKickMode()) {
         dlog.addText(Logger::TEAM, __FILE__": penalty kick");
         Bhv_PenaltyKick().execute(this);
@@ -497,8 +483,6 @@ void SamplePlayer::actionImpl()
 
     Bhv_SetPlay().execute(this);
 }
-
-// ---------------------------------------------------------------------------
 
 void SamplePlayer::handleActionStart()  {}
 void SamplePlayer::handlePlayerType()   {}
@@ -518,8 +502,6 @@ void SamplePlayer::handleActionEnd()
                      world().self().pos().y + 15.0));
     }
 }
-
-// ---------------------------------------------------------------------------
 
 void SamplePlayer::handleInitMessage()
 {
@@ -553,8 +535,6 @@ void SamplePlayer::communicationImpl()
 {
     if (M_communication) M_communication->execute(this);
 }
-
-// ---------------------------------------------------------------------------
 
 bool SamplePlayer::doPreprocess()
 {
@@ -669,8 +649,6 @@ bool SamplePlayer::doHeardPassReceive()
         0.9, 5, wm.time()));
     return true;
 }
-
-// ---------------------------------------------------------------------------
 
 FieldEvaluator::ConstPtr SamplePlayer::getFieldEvaluator() const
 {

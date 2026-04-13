@@ -19,9 +19,6 @@ def load_config(config_path: str = None) -> dict:
 class SMDPAgent:
     """
     DQN агент для Semi-Markov Decision Process.
-
-    Каждый агент обучается независимо (Independent Q-Learning):
-    своя нейросеть, свой буфер воспроизведения, свои веса.
     """
 
     def __init__(self, agent_id: int, config_path: str = None):
@@ -212,10 +209,34 @@ class SMDPAgent:
             print(f"[Agent {self.agent_id}] Loaded checkpoint. Steps: {self.steps_done}, Epsilon: {self.epsilon:.4f}")
 
     def save_elite_if_best(self, all_rewards: dict):
-        """Сохраняет свои веса как элитные если у агента лучший reward за матч."""
-        best_id = max(all_rewards, key=all_rewards.get)
-        if best_id == self.agent_id:
-            self.save_weights(self.elite_weights_path)
+        """Индивидуальное сохранение весов: бьем собственный исторический рекорд."""
+        # Берем награду из словаря
+        match_reward = all_rewards.get(self.agent_id, -float('inf'))
+        
+        # Файлы для конкретного агента
+        record_file = os.path.join(self.logs_path, f"record_agent_{self.agent_id}.json")
+        personal_weights_path = os.path.join(self.logs_path, f"best_weights_agent_{self.agent_id}.pth")
+        
+        # Читаем старый рекорд
+        personal_best = -float('inf')
+        if os.path.exists(record_file):
+            try:
+                with open(record_file, "r") as f:
+                    personal_best = json.load(f).get("best_reward", -float('inf'))
+            except json.JSONDecodeError:
+                pass
+        
+        # Сравниваем
+        if match_reward > personal_best:
+            with open(record_file, "w") as f:
+                json.dump({"best_reward": match_reward, "steps_done": self.steps_done}, f)
+            
+            self.save_weights(personal_weights_path)
+            print(f"\n[Agent {self.agent_id}] 🏆 НОВЫЙ ЛИЧНЫЙ РЕКОРД! "
+                  f"Награда: {match_reward:.2f} (прошлый: {personal_best:.2f}). Сохранено!\n")
+        else:
+            print(f"[Agent {self.agent_id}] Личный рекорд не побит. "
+                  f"(Текущий: {match_reward:.2f}, Рекорд: {personal_best:.2f})")
 
     def reset_episode(self):
         """Сбрасывает накопленную награду в начале нового матча."""
