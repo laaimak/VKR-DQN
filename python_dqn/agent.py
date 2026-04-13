@@ -72,26 +72,48 @@ class SMDPAgent:
 
         os.makedirs(self.logs_path, exist_ok=True)
 
+        if self.agent_id == 1:
+            self.role = "goalie"
+        elif 2 <= self.agent_id <= 5:
+            self.role = "defender"
+        elif 6 <= self.agent_id <= 8:
+            self.role = "midfielder"
+        else:
+            self.role = "forward"
+
+        # Формируем пути динамически
         self.log_file = os.path.join(
             self.logs_path,
             f"agent_{self.agent_id}_steps.csv"
         )
-
-        # Приоритет загрузки весов:
-        # 1. Свой чекпоинт — продолжаем обучение
-        # 2. Элитные веса — transfer learning
-        # 3. Ничего — начинаем с нуля
+        
+        # Личный чекпоинт конкретного номера (чтобы продолжить после паузы)
         agent_checkpoint = os.path.join(
             self.logs_path, f"agent_{self.agent_id}_checkpoint.pth"
         )
+        
+        # "Мастер-веса" для всей роли (например, лучшие знания всех защитников)
+        self.role_master_path = os.path.join(
+            self.logs_path, f"master_{self.role}.pth"
+        )
 
+        # 1. Свой чекпоинт (самый точный прогресс конкретного игрока)
         if os.path.exists(agent_checkpoint):
             self.load_weights(agent_checkpoint)
-        elif os.path.exists(self.elite_weights_path):
+            print(f"[Agent {self.agent_id}] Загружен личный чекпоинт.")
+            
+        # 2. Мастер-веса роли (если своего нет, берем опыт "старших братьев" по позиции)
+        elif os.path.exists(self.role_master_path):
+            self.load_weights(self.role_master_path)
+            print(f"[Agent {self.agent_id}] Наследуем мастер-веса роли: {self.role}")
+            
+        # 3. Общие элитные веса (если они прописаны в конфиге как база для всех)
+        elif self.elite_weights_path and os.path.exists(self.elite_weights_path):
             self.load_weights(self.elite_weights_path)
-            print(f"[Agent {self.agent_id}] Используем элитные веса как стартовую точку.")
+            print(f"[Agent {self.agent_id}] Используем общие элитные веса.")
+            
         else:
-            print(f"[Agent {self.agent_id}] Начинаем обучение с нуля.")
+            print(f"[Agent {self.agent_id}] Начинаем обучение с нуля для роли {self.role}.")
 
     def act(self, state: list) -> int:
         """
@@ -108,10 +130,7 @@ class SMDPAgent:
 
     def train(self) -> float | None:
         """
-        Один шаг оптимизации по уравнению Беллмана для SMDP:
-
-            y_t = R_t + gamma^tau * max_a Q(s_{t+tau}, a; theta^-)
-            L   = MSE(Q(s_t, a_t; theta), y_t)
+        Один шаг оптимизации по уравнению Беллмана для SMDP
         """
         if len(self.memory) < self.batch_size:
             return None
@@ -195,7 +214,7 @@ class SMDPAgent:
             self.target_net.load_state_dict(checkpoint['target_net'])
             self.optimizer.load_state_dict(checkpoint['optimizer'])
 
-            if 'elite' in path:
+            if 'elite' in path or 'master' in path:
                 # Transfer learning — сбрасываем шаги, начинаем исследование заново
                 self.steps_done    = 0
                 self.epsilon       = 0.30
@@ -232,8 +251,9 @@ class SMDPAgent:
                 json.dump({"best_reward": match_reward, "steps_done": self.steps_done}, f)
             
             self.save_weights(personal_weights_path)
-            print(f"\n[Agent {self.agent_id}] 🏆 НОВЫЙ ЛИЧНЫЙ РЕКОРД! "
-                  f"Награда: {match_reward:.2f} (прошлый: {personal_best:.2f}). Сохранено!\n")
+            
+            self.save_weights(self.role_master_path) 
+            print(f"[Agent {self.agent_id}] Мастер-веса роли {self.role} обновлены!")
         else:
             print(f"[Agent {self.agent_id}] Личный рекорд не побит. "
                   f"(Текущий: {match_reward:.2f}, Рекорд: {personal_best:.2f})")
