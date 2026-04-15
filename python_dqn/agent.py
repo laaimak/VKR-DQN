@@ -19,9 +19,16 @@ def load_config(config_path: str = None) -> dict:
 class SMDPAgent:
     """
     DQN агент для Semi-Markov Decision Process.
-    """
 
+    Каждый агент обучается независимо (Independent Q-Learning):
+    своя нейросеть, свой буфер воспроизведения, свои веса.
+    """
     def __init__(self, agent_id: int, config_path: str = None):
+        
+        forced_id = os.environ.get("AGENT_FORCE_ID")
+        if forced_id is not None:
+            agent_id = int(forced_id)
+        
         self.agent_id = agent_id
         self.config_path = config_path
         cfg = load_config(config_path)
@@ -86,6 +93,11 @@ class SMDPAgent:
             self.logs_path,
             f"agent_{self.agent_id}_steps.csv"
         )
+
+        self.episode_log_file = os.path.join(
+            self.logs_path,
+            f"agent_{self.agent_id}_episode_rewards.csv"
+        )
         
         # Личный чекпоинт конкретного номера (чтобы продолжить после паузы)
         agent_checkpoint = os.path.join(
@@ -115,6 +127,8 @@ class SMDPAgent:
         else:
             print(f"[Agent {self.agent_id}] Начинаем обучение с нуля для роли {self.role}.")
 
+        
+        
     def act(self, state: list) -> int:
         """
         ε-жадный выбор макро-действия.
@@ -130,7 +144,10 @@ class SMDPAgent:
 
     def train(self) -> float | None:
         """
-        Один шаг оптимизации по уравнению Беллмана для SMDP
+        Один шаг оптимизации по уравнению Беллмана для SMDP:
+
+            y_t = R_t + gamma^tau * max_a Q(s_{t+tau}, a; theta^-)
+            L   = MSE(Q(s_t, a_t; theta), y_t)
         """
         if len(self.memory) < self.batch_size:
             return None
@@ -154,7 +171,8 @@ class SMDPAgent:
             discount = torch.pow(self.gamma, taus)
             target_q = rewards + (discount * next_q * (1 - dones))
 
-        loss = F.mse_loss(current_q, target_q.unsqueeze(1))
+        # Huber loss устойчивее MSE при редких больших TD-ошибках.
+        loss = F.smooth_l1_loss(current_q, target_q.unsqueeze(1))
 
         self.optimizer.zero_grad()
         loss.backward()
@@ -163,6 +181,9 @@ class SMDPAgent:
 
         self.steps_done += 1
         self._update_epsilon()
+        
+        if self.steps_done % 100 == 0:
+            self._check_and_save_record()
 
         if self.steps_done % self.log_interval == 0:
             self._log_step(loss.item(), rewards.mean().item())
@@ -187,8 +208,10 @@ class SMDPAgent:
                         done: bool,
                         tau: int):
         """Добавляет переход в буфер воспроизведения."""
+        # Клиппинг награды стабилизирует диапазон target_q.
+        reward_for_training = max(-10.0, min(10.0, reward))
         self.episode_reward += reward
-        self.memory.push(state, action, reward, next_state, done, tau)
+        self.memory.push(state, action, reward_for_training, next_state, done, tau)
 
     def _update_epsilon(self):
         """Экспоненциальное убывание ε по мере накопления опыта."""
@@ -208,28 +231,27 @@ class SMDPAgent:
         }, path)
 
     def load_weights(self, path: str):
+        """Загружает веса, состояние оптимизатора, шаги и Эпсилон."""
         if os.path.exists(path):
             checkpoint = torch.load(path, map_location=self.device)
             self.policy_net.load_state_dict(checkpoint['policy_net'])
             self.target_net.load_state_dict(checkpoint['target_net'])
-            self.optimizer.load_state_dict(checkpoint['optimizer'])
+            
+            # Загружаем оптимизатор, чтобы Adam помнил моментум
+            if 'optimizer' in checkpoint:
+                self.optimizer.load_state_dict(checkpoint['optimizer'])
 
-            if 'elite' in path or 'master' in path:
-                # Transfer learning — сбрасываем шаги, начинаем исследование заново
-                self.steps_done    = 0
-                self.epsilon       = 0.30
-                self.epsilon_start = 0.30
-                print(f"[Agent {self.agent_id}] TRANSFER LEARNING!")
-            else:
-                self.steps_done    = checkpoint['steps_done']
-                self.epsilon       = checkpoint['epsilon']
-                self.epsilon_start = checkpoint.get('epsilon_start', self.epsilon_start)
+            # Восстанавливаем прогресс обучения
+            self.steps_done    = checkpoint.get('steps_done', 0)
+            self.epsilon       = checkpoint.get('epsilon', self.epsilon_start)
+            self.epsilon_start = checkpoint.get('epsilon_start', self.epsilon_start)
 
-            print(f"[Agent {self.agent_id}] Loaded checkpoint. Steps: {self.steps_done}, Epsilon: {self.epsilon:.4f}")
-
+            print(f"[Agent {self.agent_id}] 🧠 Загружен чекпоинт из {os.path.basename(path)}.")
+            print(f"[Agent {self.agent_id}] 🔄 Продолжаем! Шаги: {self.steps_done}, Эпсилон: {self.epsilon:.4f}")
+            
     def save_elite_if_best(self, all_rewards: dict):
         """Индивидуальное сохранение весов: бьем собственный исторический рекорд."""
-        # Берем награду из словаря
+        # Берем награду из словаря (там только мы сами, так как C++ шлет только себя)
         match_reward = all_rewards.get(self.agent_id, -float('inf'))
         
         # Файлы для конкретного агента
@@ -262,6 +284,52 @@ class SMDPAgent:
         """Сбрасывает накопленную награду в начале нового матча."""
         self.episode_reward = 0.0
 
+    def log_episode_result(self, our_score: int, opp_score: int, episode_reward: float | None = None):
+        """Пишет итог матча в отдельный CSV: награда, счет, шаги, epsilon."""
+        if episode_reward is None:
+            episode_reward = self.episode_reward
+
+        file_has_content = os.path.isfile(self.episode_log_file) and os.path.getsize(self.episode_log_file) > 0
+
+        match_id = 1
+        if file_has_content:
+            with open(self.episode_log_file, mode='r') as f:
+                # -1 для заголовка
+                line_count = sum(1 for _ in f)
+                match_id = max(1, line_count)
+
+        with open(self.episode_log_file, mode='a') as f:
+            if not file_has_content:
+                f.write("Match,EpisodeReward,ScoreFor,ScoreAgainst,StepsDone,Epsilon\n")
+            f.write(
+                f"{match_id},{episode_reward:.6f},{our_score},{opp_score},{self.steps_done},{self.epsilon:.4f}\n"
+            )
+            f.flush()
+            os.fsync(f.fileno())
+    
+    def _check_and_save_record(self):
+        """Страховка: сохраняем рекорд ПРЯМО ВО ВРЕМЯ МАТЧА."""
+        record_file = os.path.join(self.logs_path, f"record_agent_{self.agent_id}.json")
+        personal_weights_path = os.path.join(self.logs_path, f"best_weights_agent_{self.agent_id}.pth")
+
+        personal_best = -float('inf')
+        if os.path.exists(record_file):
+            try:
+                with open(record_file, "r") as f:
+                    personal_best = json.load(f).get("best_reward", -float('inf'))
+            except json.JSONDecodeError:
+                pass
+
+        # Если текущая накопленная награда УЖЕ больше рекорда — сохраняем!
+        if self.episode_reward > personal_best:
+            with open(record_file, "w") as f:
+                json.dump({"best_reward": self.episode_reward, "steps_done": self.steps_done}, f)
+            
+            self.save_weights(personal_weights_path)
+            self.save_weights(self.role_master_path)
+            print(f"[Agent {self.agent_id}] 🔥 СТРАХОВКА СРАБОТАЛА: Награда {self.episode_reward:.2f} побила рекорд! Мастер-веса обновлены.")
+
+    
     def _log_step(self, loss: float, avg_reward: float):
         file_has_content = os.path.isfile(self.log_file) and os.path.getsize(self.log_file) > 0
         with open(self.log_file, mode='a') as f:

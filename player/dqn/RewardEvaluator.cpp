@@ -83,6 +83,26 @@ void RewardEvaluator::updateStep(const rcsc::WorldModel& wm, const rcsc::Vector2
             }
         }
     }
+    // РОЛЬ: ПОЛУЗАЩИТНИК (Номера 6, 7, 8, 9)
+    else if (unum >= 6 && unum <= 9) {
+        double delta_dist = M_last_distance - current_distance;
+        double delta_stamina = std::max(0.0, M_last_stamina - current_stamina);
+
+        // Полузащитники должны поддерживать переход фазы: прессинг + продвижение.
+        step_reward = 0.7 * M_w1 * delta_dist - 0.8 * M_w2 * delta_stamina;
+
+        if (wm.self().isKickable()) {
+            step_reward += 0.5 * M_kickable_bonus;
+        }
+
+        if (wm.gameMode().type() == rcsc::Goal_L || wm.gameMode().type() == rcsc::Goal_R) {
+            if (wm.gameMode().side() == wm.ourSide()) step_reward += 0.8 * M_r_goal;
+            else if (wm.gameMode().side() != rcsc::NEUTRAL) step_reward -= 0.8 * M_r_goal;
+        }
+    }
+
+    // Ограничиваем мгновенную награду, чтобы уменьшить взрывы TD-ошибки.
+    step_reward = std::clamp(step_reward, -10.0, 10.0);
 
     M_accumulated_reward += std::pow(M_gamma, M_current_tau) * step_reward;
     M_last_distance = current_distance;

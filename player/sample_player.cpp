@@ -1,3 +1,10 @@
+// -*-c++-*-
+
+/*
+ * Copyright: Hidehisa AKIYAMA
+ * Modified for DQN integration: pybind11 bridge replaces TCP client
+ */
+
 #ifdef HAVE_CONFIG_H
 #include <config.h>
 #endif
@@ -58,13 +65,17 @@
 
 using namespace rcsc;
 
+// ---------------------------------------------------------------------------
 // Пути к конфигурации и Python модулям
-
+// Задаются относительно рабочей директории запуска агента
+// ---------------------------------------------------------------------------
 static const std::string DQN_CONFIG_PATH = "/Users/laaimak/Desktop/VKR/python_dqn/config.json";
 static const std::string DQN_MODULE_DIR  = "/Users/laaimak/Desktop/VKR/python_dqn";
 
-// Вратарь управляется FSM helios
+// Вратарь (unum=1) управляется FSM helios, не DQN
 static const int GOALIE_UNUM = 1;
+
+// ---------------------------------------------------------------------------
 
 SamplePlayer::SamplePlayer()
     : PlayerAgent()
@@ -112,8 +123,10 @@ SamplePlayer::SamplePlayer()
 
 SamplePlayer::~SamplePlayer()
 {
-    
+    // DQN Bridge освобождается через unique_ptr автоматически
 }
+
+// ---------------------------------------------------------------------------
 
 bool SamplePlayer::initImpl(CmdLineParser& cmd_parser)
 {
@@ -149,13 +162,17 @@ bool SamplePlayer::initImpl(CmdLineParser& cmd_parser)
     return true;
 }
 
-// Инициализация DQN Bridge
+// ---------------------------------------------------------------------------
+// Ленивая инициализация DQN Bridge
 // Вызывается при первом такте PlayOn чтобы знать unum агента
-
+// ---------------------------------------------------------------------------
 void SamplePlayer::initDQNIfNeeded()
 {
     if (M_dqn_bridge) return;
-    if (M_dqn_init_failed) return;  // уже пробовали — не пробуем снова
+    if (M_dqn_init_failed) return; 
+
+    if (world().ourTeamName() != "DQN_Team") return;
+
     if (world().self().unum() == GOALIE_UNUM) return;
     if (world().self().goalie()) return;
 
@@ -179,8 +196,9 @@ void SamplePlayer::initDQNIfNeeded()
     }
 }
 
+// ---------------------------------------------------------------------------
 // Условия досрочного завершения макро-действия
-
+// ---------------------------------------------------------------------------
 bool SamplePlayer::isMacroActionDone(const WorldModel& wm) const
 {
     switch (M_current_macro_action) {
@@ -223,8 +241,9 @@ bool SamplePlayer::isMacroActionDone(const WorldModel& wm) const
     }
 }
 
+// ---------------------------------------------------------------------------
 // Максимальная длительность каждого макро-действия (в тактах)
-
+// ---------------------------------------------------------------------------
 int SamplePlayer::getMaxTau(int action) const
 {
     switch (action) {
@@ -240,68 +259,70 @@ int SamplePlayer::getMaxTau(int action) const
     }
 }
 
+// ---------------------------------------------------------------------------
 // Выполнение макро-действия
-
-void SamplePlayer::executeMacroAction(int action)
+// ---------------------------------------------------------------------------
+bool SamplePlayer::executeMacroAction(int action)
 {
     const WorldModel& wm = world();
+    bool executed = false;
 
     switch (action) {
     case 1: // shoot
         if ( wm.self().isKickable() ) {
-            Bhv_StrictCheckShoot().execute(this);
+            executed = Bhv_StrictCheckShoot().execute(this);
         } else {
-            Body_Intercept().execute(this);
+            executed = Body_Intercept().execute(this);
         }
         break;
 
     case 2: // pass
         if ( wm.self().isKickable() ) {
-            Body_KickOneStep(ServerParam::i().theirTeamGoalPos(),
-                            ServerParam::i().ballSpeedMax()).execute(this);
+            executed = Body_KickOneStep(ServerParam::i().theirTeamGoalPos(),
+                                        ServerParam::i().ballSpeedMax()).execute(this);
         } else {
-            Body_Intercept().execute(this);
+            executed = Body_Intercept().execute(this);
         }
         break;
 
     case 3: // dribble
         if ( wm.self().isKickable() ) {
-            Body_AdvanceBall2009().execute(this);
+            executed = Body_AdvanceBall2009().execute(this);
         } else {
-            Body_Intercept().execute(this);
+            executed = Body_Intercept().execute(this);
         }
         break;
 
     case 4: // clear
         if ( wm.self().isKickable() ) {
-            Body_ClearBall2009().execute(this);
+            executed = Body_ClearBall2009().execute(this);
         } else {
-            Body_Intercept().execute(this);
+            executed = Body_Intercept().execute(this);
         }
         break;
 
     case 5: // hold
         if ( wm.self().isKickable() ) {
-            Body_HoldBall2008().execute(this);
+            executed = Body_HoldBall2008().execute(this);
         } else {
-            Body_Intercept().execute(this);
+            executed = Body_Intercept().execute(this);
         }
         break;
 
     case 6: // intercept
-        Body_Intercept().execute(this);
+        executed = Body_Intercept().execute(this);
         this->setNeckAction(new Neck_TurnToBall());
         break;
 
     case 7: // block — движемся к мячу чтобы блокировать противника
-        Body_GoToPoint(
+        executed = Body_GoToPoint(
             wm.ball().pos(), 0.5,
             ServerParam::i().maxDashPower()
         ).execute(this);
         break;
 
     case 8: // positioning — движемся на тактическую позицию
-        Body_GoToPoint(
+        executed = Body_GoToPoint(
             Strategy::i().getPosition(wm.self().unum()),
             0.5,
             ServerParam::i().maxDashPower()
@@ -313,17 +334,24 @@ void SamplePlayer::executeMacroAction(int action)
         {
             SoccerRole::Ptr role =
                 Strategy::i().createRole(wm.self().unum(), wm);
-            if (role) role->execute(this);
+            if (role) executed = role->execute(this);
         }
         break;
     }
 
+    // Если выбранное поведение не выставило body-команду, даем безопасный fallback.
+    if (!executed) {
+        executed = Body_Intercept().execute(this);
+    }
+
     this->setNeckAction( new Neck_TurnToBallOrScan( 0 ) );
-        
+
+    return executed;
 }
 
+// ---------------------------------------------------------------------------
 // Главный цикл принятия решений
-
+// ---------------------------------------------------------------------------
 void SamplePlayer::actionImpl()
 {
     if (this->audioSensor().trainerMessageTime() == world().time()) {
@@ -379,10 +407,12 @@ void SamplePlayer::actionImpl()
         return;
     }
 
+    // =======================================================================
     // DQN управление полевыми игроками в режиме PlayOn
+    // =======================================================================
     if (world().gameMode().type() == GameMode::PlayOn) {
 
-        // Инициализация DQN при первом такте
+        // Ленивая инициализация DQN при первом такте
         initDQNIfNeeded();
 
         // Если DQN недоступен — fallback на helios FSM
@@ -402,12 +432,17 @@ void SamplePlayer::actionImpl()
         Vector2D target_pos =
             StateBuilder::getTargetPosition(wm, tactical_pos);
 
+        // Конец матча
         bool done = (wm.time().cycle() >= 6000);
 
+        // -------------------------------------------------------------------
         // Проверяем завершение текущего макро-действия
+        // -------------------------------------------------------------------
         bool macro_done = !M_macro_active
             || isMacroActionDone(wm)
             || (M_macro_action_timer >= getMaxTau(M_current_macro_action));
+
+        bool transition_pushed_this_cycle = false;
 
         if (macro_done && M_macro_active) {
             // Получаем итоговую накопленную награду R_t и длительность tau
@@ -426,6 +461,7 @@ void SamplePlayer::actionImpl()
                 done,
                 tau
             );
+            transition_pushed_this_cycle = true;
             std::cerr << "[DEBUG] pushAndTrain called. tau=" << tau 
                     << " reward=" << final_reward << std::endl;
         }
@@ -452,29 +488,52 @@ void SamplePlayer::actionImpl()
         executeMacroAction(M_current_macro_action);
 
         // Обрабатываем конец матча
+        // Обрабатываем конец матча
+        // Обрабатываем конец матча
         if (done) {
-            int tau = 0;
-            double final_reward = M_reward_evaluator->getFinalRewardAndReset(tau);
-            std::vector<double> current_state = StateBuilder::getState(wm);
-            M_dqn_bridge->pushAndTrain(
-                M_last_state, M_last_action,
-                final_reward, current_state, true, tau
-            );
+            std::cerr << "--- FINAL SAVING START ---" << std::endl;
 
-            // Сохраняем элитные веса
-            std::vector<std::pair<int, double>> rewards = {
-                {wm.self().unum(), M_dqn_bridge->getEpisodeReward()}
-            };
-            M_dqn_bridge->saveEliteIfBest(rewards);
+            // Если матч завершился до формального конца макро-действия,
+            // принудительно сбрасываем финальный переход.
+            if (M_macro_active && !transition_pushed_this_cycle) {
+                int tau = 0;
+                double final_reward = M_reward_evaluator->getFinalRewardAndReset(tau);
+                std::vector<double> terminal_state = StateBuilder::getState(wm);
+                M_dqn_bridge->pushAndTrain(
+                    M_last_state,
+                    M_last_action,
+                    final_reward,
+                    terminal_state,
+                    true,
+                    tau
+                );
+            }
 
-            M_dqn_bridge->resetEpisode();
-            M_macro_active = false;
+            if (M_dqn_bridge) {
+                M_dqn_bridge->saveEliteIfBest({{wm.self().unum(), M_dqn_bridge->getEpisodeReward()}});
+            }
+            
+            // Вычисляем и печатаем счет
+            int our_score = (wm.ourSide() == rcsc::LEFT) ? wm.gameMode().scoreLeft() : wm.gameMode().scoreRight();
+            int opp_score = (wm.ourSide() == rcsc::LEFT) ? wm.gameMode().scoreRight() : wm.gameMode().scoreLeft();
+
+            if (M_dqn_bridge) {
+                M_dqn_bridge->logEpisodeResult(our_score, opp_score);
+            }
+            
+            std::cout << "Score: " << our_score << " - " << opp_score << std::endl;
+            std::cout.flush(); 
+            
+            std::cerr << "--- DISCONNECTING ---" << std::endl;
+            std::_Exit(0); 
         }
-
+        
         return;
     }
 
+    // =======================================================================
     // Прочие режимы (penalty kick, set play)
+    // =======================================================================
     if (world().gameMode().isPenaltyKickMode()) {
         dlog.addText(Logger::TEAM, __FILE__": penalty kick");
         Bhv_PenaltyKick().execute(this);
@@ -483,6 +542,8 @@ void SamplePlayer::actionImpl()
 
     Bhv_SetPlay().execute(this);
 }
+
+// ---------------------------------------------------------------------------
 
 void SamplePlayer::handleActionStart()  {}
 void SamplePlayer::handlePlayerType()   {}
@@ -502,6 +563,8 @@ void SamplePlayer::handleActionEnd()
                      world().self().pos().y + 15.0));
     }
 }
+
+// ---------------------------------------------------------------------------
 
 void SamplePlayer::handleInitMessage()
 {
@@ -535,6 +598,8 @@ void SamplePlayer::communicationImpl()
 {
     if (M_communication) M_communication->execute(this);
 }
+
+// ---------------------------------------------------------------------------
 
 bool SamplePlayer::doPreprocess()
 {
@@ -649,6 +714,8 @@ bool SamplePlayer::doHeardPassReceive()
         0.9, 5, wm.time()));
     return true;
 }
+
+// ---------------------------------------------------------------------------
 
 FieldEvaluator::ConstPtr SamplePlayer::getFieldEvaluator() const
 {

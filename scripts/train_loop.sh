@@ -8,7 +8,7 @@
 
 source /Users/laaimak/Desktop/VKR/.venv314/bin/activate
 
-MATCHES=${1:-100}
+MATCHES=${1:-1000}
 
 HELIOS_DQN="/Users/laaimak/Desktop/VKR/helios-base/src/player/sample_player"
 HELIOS_DQN_DIR="/Users/laaimak/Desktop/VKR/helios-base/src"
@@ -16,7 +16,7 @@ HELIOS_OPP="/Users/laaimak/Desktop/VKR/helios-original/build/bin/sample_player"
 HELIOS_OPP_DIR="/Users/laaimak/Desktop/VKR/helios-original/build/bin"
 RCSSSERVER_DIR="/Users/laaimak/Desktop/VKR/rcssserver-master/build"
 
-MATCH_DURATION=620
+MATCH_DURATION=800
 
 echo "============================================"
 echo " Начинаем обучение: $MATCHES матчей"
@@ -50,7 +50,9 @@ for match in $(seq 1 $MATCHES); do
     cd "$HELIOS_DQN_DIR"
     "$HELIOS_DQN" --host localhost --port 6000 -t DQN_Team -n 1 -g &
     sleep 0.2
-    "$HELIOS_DQN" --host localhost --port 6000 -t DQN_Team -n 2 &
+
+    export AGENT_FORCE_ID=11
+    "$HELIOS_DQN" --host localhost --port 6000 -t DQN_Team -n 11 &
     sleep 0.2
 
     # Запускаем противника
@@ -58,11 +60,11 @@ for match in $(seq 1 $MATCHES); do
     cd "$HELIOS_OPP_DIR"
     "$HELIOS_OPP" --host localhost --port 6000 -t Helios_Opp -n 1 -g &
     sleep 0.2
-    "$HELIOS_OPP" --host localhost --port 6000 -t Helios_Opp -n 11 &
+    "$HELIOS_OPP" --host localhost --port 6000 -t Helios_Opp -n 3 &
     sleep 0.2
 
     # Целевой файл логов
-    LOG_FILE="/Users/laaimak/Desktop/VKR/helios-base/src/logs/agent_2_steps.csv"
+    LOG_FILE="/Users/laaimak/Desktop/VKR/helios-base/src/logs/agent_11_steps.csv"
     # if [ ! -f "$LOG_FILE" ]; then
     #     echo "Step,Loss,AvgReward,Epsilon" > "$LOG_FILE"
     # fi

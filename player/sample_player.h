@@ -1,3 +1,10 @@
+// -*-c++-*-
+
+/*
+ * Copyright: Hidehisa AKIYAMA
+ * Modified for DQN integration
+ */
+
 #ifndef SAMPLE_PLAYER_H
 #define SAMPLE_PLAYER_H
 
@@ -14,6 +21,7 @@
 #include <vector>
 #include <memory>
 
+// Forward declarations
 class DQNBridge;
 
 class SamplePlayer
@@ -61,7 +69,7 @@ protected:
 
 private:
 
-    // Инициализация DQN (вызывается при первом такте PlayOn)
+    // Ленивая инициализация DQN (вызывается при первом такте PlayOn)
     void initDQNIfNeeded();
 
     // Условие досрочного завершения макро-действия
@@ -71,7 +79,8 @@ private:
     int getMaxTau(int action) const;
 
     // Выполнение выбранного макро-действия
-    void executeMacroAction(int action);
+    // Возвращает true, если удалось выставить body-команду
+    bool executeMacroAction(int action);
 
     bool doPreprocess();
     bool doShoot();
