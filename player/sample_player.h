@@ -20,6 +20,7 @@
 
 #include <vector>
 #include <memory>
+#include <array>
 
 // Forward declarations
 class DQNBridge;
@@ -43,6 +44,10 @@ private:
     std::vector<double>  M_last_state;           // s_t на момент выбора действия
     int                  M_last_action;          // выбранное действие o_t
     bool                 M_macro_active;         // флаг активного макро-действия
+    std::array<int, 8>   M_max_tau_by_action{{10, 10, 20, 10, 15, 30, 20, 40}};
+    int                  M_match_end_cycle = 1200;
+    bool                 M_episode_finalized = false;
+    bool                 M_goal_event_consumed = false;
     bool M_dqn_init_failed = false;
 
 public:
@@ -81,6 +86,8 @@ private:
     // Выполнение выбранного макро-действия
     // Возвращает true, если удалось выставить body-команду
     bool executeMacroAction(int action);
+
+    void finalizeEpisode(bool terminate_process);
 
     bool doPreprocess();
     bool doShoot();

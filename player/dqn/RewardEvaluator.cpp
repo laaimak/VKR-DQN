@@ -6,12 +6,14 @@ RewardEvaluator::RewardEvaluator(double gamma,
                                  double w1,
                                  double w2,
                                  double r_goal,
-                                 double kickable_bonus)
+                                 double kickable_bonus,
+                                 double own_half_penalty)
     : M_gamma(gamma)
     , M_w1(w1)
     , M_w2(w2)
     , M_r_goal(r_goal)
     , M_kickable_bonus(kickable_bonus)
+    , M_own_half_penalty(own_half_penalty)
     , M_accumulated_reward(0.0)
     , M_current_tau(0)
     , M_last_distance(-1.0)
@@ -32,28 +34,21 @@ void RewardEvaluator::updateStep(const rcsc::WorldModel& wm, const rcsc::Vector2
 {
     double current_distance = wm.self().pos().dist(target_pos);
     double current_stamina  = wm.self().stamina();
-    double step_reward = 0.0;
-    
+    double shaping_reward = 0.0;
     int unum = wm.self().unum();
 
     // РОЛЬ: НАПАДАЮЩИЙ (Номера 10 и 11)
     if (unum == 10 || unum == 11) {
         double delta_dist = M_last_distance - current_distance;
         double delta_stamina = std::max(0.0, M_last_stamina - current_stamina);
-        step_reward = M_w1 * delta_dist - M_w2 * delta_stamina;
+        shaping_reward = M_w1 * delta_dist - M_w2 * delta_stamina;
 
-        if (wm.self().isKickable()) step_reward += M_kickable_bonus;
-        if (wm.self().isFrozen()) step_reward -= 10.0;
+        if (wm.self().isKickable()) shaping_reward += M_kickable_bonus;
+        if (wm.self().isFrozen()) shaping_reward -= 10.0;
         
         // Штраф за свою половину поля (гоним его в атаку)
         if (wm.gameMode().type() == rcsc::GameMode::PlayOn && wm.ball().pos().x < 0.0) {
-            step_reward -= 0.02;
-        }
-
-        // Награда за гол
-        if (wm.gameMode().type() == rcsc::Goal_L || wm.gameMode().type() == rcsc::Goal_R) {
-            if (wm.gameMode().side() == wm.ourSide()) step_reward += M_r_goal;
-            else if (wm.gameMode().side() != rcsc::NEUTRAL) step_reward -= M_r_goal;
+            shaping_reward -= M_own_half_penalty;
         }
     }
     // РОЛЬ: ЗАЩИТНИК (Номера 2, 3, 4, 5)
@@ -61,26 +56,19 @@ void RewardEvaluator::updateStep(const rcsc::WorldModel& wm, const rcsc::Vector2
         
         // 1. Награда за владение мячом (перехват/отбор)
         if (wm.self().isKickable()) {
-            step_reward += M_kickable_bonus * 2.0; // Защитнику важнее отбирать мяч
+            shaping_reward += M_kickable_bonus * 2.0; // Защитнику важнее отбирать мяч
         }
         
         // 2. Штраф, если мяч слишком близко к нашим воротам
         double dist_to_our_goal = wm.ball().pos().dist(rcsc::Vector2D(-52.5, 0.0));
         if (dist_to_our_goal < 20.0) {
-            step_reward -= 0.05; // Бьем тревогой, мяч в опасной зоне!
+            shaping_reward -= 0.05; // Бьем тревогой, мяч в опасной зоне!
         }
         
         // 3. Награда за вынос мяча
         // Для простоты пока даем бонус, если мяч перешел центр поля
         if (wm.ball().pos().x > 0.0) {
-            step_reward += 0.01; // Мяч выбит, можно выдохнуть
-        }
-
-        // 4. Огромный штраф за пропущенный гол
-        if (wm.gameMode().type() == rcsc::Goal_L || wm.gameMode().type() == rcsc::Goal_R) {
-            if (wm.gameMode().side() != wm.ourSide() && wm.gameMode().side() != rcsc::NEUTRAL) {
-                step_reward -= M_r_goal; // Вся вина на защите!
-            }
+            shaping_reward += 0.01; // Мяч выбит, можно выдохнуть
         }
     }
     // РОЛЬ: ПОЛУЗАЩИТНИК (Номера 6, 7, 8, 9)
@@ -89,25 +77,54 @@ void RewardEvaluator::updateStep(const rcsc::WorldModel& wm, const rcsc::Vector2
         double delta_stamina = std::max(0.0, M_last_stamina - current_stamina);
 
         // Полузащитники должны поддерживать переход фазы: прессинг + продвижение.
-        step_reward = 0.7 * M_w1 * delta_dist - 0.8 * M_w2 * delta_stamina;
+        shaping_reward = 0.7 * M_w1 * delta_dist - 0.8 * M_w2 * delta_stamina;
 
         if (wm.self().isKickable()) {
-            step_reward += 0.5 * M_kickable_bonus;
-        }
-
-        if (wm.gameMode().type() == rcsc::Goal_L || wm.gameMode().type() == rcsc::Goal_R) {
-            if (wm.gameMode().side() == wm.ourSide()) step_reward += 0.8 * M_r_goal;
-            else if (wm.gameMode().side() != rcsc::NEUTRAL) step_reward -= 0.8 * M_r_goal;
+            shaping_reward += 0.5 * M_kickable_bonus;
         }
     }
 
-    // Ограничиваем мгновенную награду, чтобы уменьшить взрывы TD-ошибки.
-    step_reward = std::clamp(step_reward, -10.0, 10.0);
+    // Ограничиваем только shaping-компоненту, чтобы не резать терминальный сигнал r_goal.
+    shaping_reward = std::clamp(shaping_reward, -10.0, 10.0);
 
-    M_accumulated_reward += std::pow(M_gamma, M_current_tau) * step_reward;
+    M_accumulated_reward += std::pow(M_gamma, M_current_tau) * shaping_reward;
     M_last_distance = current_distance;
     M_last_stamina  = current_stamina;
     M_current_tau++;
+}
+
+double RewardEvaluator::terminalGoalReward(const rcsc::WorldModel& wm) const
+{
+    if (wm.gameMode().type() != rcsc::GameMode::AfterGoal_) {
+        return 0.0;
+    }
+
+    if (wm.gameMode().side() == rcsc::NEUTRAL) {
+        return 0.0;
+    }
+
+    const bool our_goal = (wm.gameMode().side() == wm.ourSide());
+    const int unum = wm.self().unum();
+
+    if (unum == 10 || unum == 11) {
+        return our_goal ? M_r_goal : -M_r_goal;
+    }
+
+    if (unum >= 2 && unum <= 5) {
+        // Для защиты ключевой сигнал — сильный штраф за пропущенный мяч.
+        return our_goal ? 0.0 : -M_r_goal;
+    }
+
+    if (unum >= 6 && unum <= 9) {
+        return our_goal ? 0.8 * M_r_goal : -0.8 * M_r_goal;
+    }
+
+    return our_goal ? M_r_goal : -M_r_goal;
+}
+
+void RewardEvaluator::addTerminalGoalReward(const rcsc::WorldModel& wm)
+{
+    M_accumulated_reward += std::pow(M_gamma, M_current_tau) * terminalGoalReward(wm);
 }
 
 double RewardEvaluator::getFinalRewardAndReset(int& out_tau)

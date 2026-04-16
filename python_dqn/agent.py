@@ -16,6 +16,41 @@ def load_config(config_path: str = None) -> dict:
         return json.load(f)
 
 
+def get_role_by_agent_id(agent_id: int) -> str:
+    if agent_id == 1:
+        return "goalie"
+    if 2 <= agent_id <= 5:
+        return "defender"
+    if 6 <= agent_id <= 9:
+        return "midfielder"
+    return "forward"
+
+
+def resolve_role_config_path(agent_id: int, config_path: str | None) -> str:
+    """Возвращает путь к конфигу с приоритетом role-specific файла."""
+    if config_path:
+        base_path = config_path
+    else:
+        base_path = os.path.join(os.path.dirname(__file__), "config.json")
+
+    base_dir = os.path.dirname(base_path)
+    role = get_role_by_agent_id(agent_id)
+
+    role_config_map = {
+        "defender": "config_defender.json",
+        "midfielder": "config_midfielder.json",
+        "forward": "config_forward.json",
+    }
+
+    role_cfg_name = role_config_map.get(role)
+    if role_cfg_name:
+        role_cfg_path = os.path.join(base_dir, role_cfg_name)
+        if os.path.exists(role_cfg_path):
+            return role_cfg_path
+
+    return base_path
+
+
 class SMDPAgent:
     """
     DQN агент для Semi-Markov Decision Process.
@@ -30,8 +65,10 @@ class SMDPAgent:
             agent_id = int(forced_id)
         
         self.agent_id = agent_id
-        self.config_path = config_path
-        cfg = load_config(config_path)
+        self.role = get_role_by_agent_id(self.agent_id)
+        self.config_path = resolve_role_config_path(self.agent_id, config_path)
+        cfg = load_config(self.config_path)
+        self.cfg = cfg
 
         learn_cfg = cfg["learning"]
         net_cfg   = cfg["network"]
@@ -56,8 +93,8 @@ class SMDPAgent:
 
         # Основная сеть обновляется каждый шаг,
         # целевая — каждые target_update_freq шагов
-        self.policy_net = DQNetwork(config_path).to(self.device)
-        self.target_net = DQNetwork(config_path).to(self.device)
+        self.policy_net = DQNetwork(self.config_path).to(self.device)
+        self.target_net = DQNetwork(self.config_path).to(self.device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval()
 
@@ -66,7 +103,7 @@ class SMDPAgent:
             lr=learn_cfg["learning_rate"]
         )
 
-        self.memory = ReplayBuffer(config_path)
+        self.memory = ReplayBuffer(self.config_path)
 
         self.batch_size         = learn_cfg["batch_size"]
         self.target_update_freq = learn_cfg["target_update_freq"]
@@ -79,14 +116,7 @@ class SMDPAgent:
 
         os.makedirs(self.logs_path, exist_ok=True)
 
-        if self.agent_id == 1:
-            self.role = "goalie"
-        elif 2 <= self.agent_id <= 5:
-            self.role = "defender"
-        elif 6 <= self.agent_id <= 8:
-            self.role = "midfielder"
-        else:
-            self.role = "forward"
+        print(f"[Agent {self.agent_id}] Роль: {self.role}. Конфиг: {os.path.basename(self.config_path)}")
 
         # Формируем пути динамически
         self.log_file = os.path.join(
@@ -98,11 +128,17 @@ class SMDPAgent:
             self.logs_path,
             f"agent_{self.agent_id}_episode_rewards.csv"
         )
+
+        if (not os.path.isfile(self.episode_log_file)
+                or os.path.getsize(self.episode_log_file) == 0):
+            with open(self.episode_log_file, mode='w') as f:
+                f.write("Match,EpisodeReward,ScoreFor,ScoreAgainst,StepsDone,Epsilon\n")
         
         # Личный чекпоинт конкретного номера (чтобы продолжить после паузы)
         agent_checkpoint = os.path.join(
             self.logs_path, f"agent_{self.agent_id}_checkpoint.pth"
         )
+        self.agent_checkpoint = agent_checkpoint
         
         # "Мастер-веса" для всей роли (например, лучшие знания всех защитников)
         self.role_master_path = os.path.join(
@@ -126,6 +162,28 @@ class SMDPAgent:
             
         else:
             print(f"[Agent {self.agent_id}] Начинаем обучение с нуля для роли {self.role}.")
+
+    def get_runtime_params(self) -> dict:
+        """Возвращает runtime-параметры для C++ части из config.json."""
+        learn_cfg = self.cfg.get("learning", {})
+        reward_cfg = self.cfg.get("reward", {})
+        macro_cfg = self.cfg.get("macro_actions", {})
+        train_cfg = self.cfg.get("training", {})
+
+        max_tau = macro_cfg.get("max_tau_by_action", [10, 10, 20, 10, 15, 30, 20, 40])
+        if not isinstance(max_tau, list) or len(max_tau) != 8:
+            max_tau = [10, 10, 20, 10, 15, 30, 20, 40]
+
+        return {
+            "gamma": float(learn_cfg.get("gamma", 0.99)),
+            "w1": float(reward_cfg.get("w1", 1.0)),
+            "w2": float(reward_cfg.get("w2", 0.001)),
+            "r_goal": float(reward_cfg.get("r_goal", 100.0)),
+            "kickable_bonus": float(reward_cfg.get("kickable_bonus", 5.0)),
+            "own_half_penalty": float(reward_cfg.get("own_half_penalty", 0.02)),
+            "max_tau_by_action": [int(x) for x in max_tau],
+            "match_end_cycle": int(train_cfg.get("match_end_cycle", 1200)),
+        }
 
         
         
@@ -176,14 +234,12 @@ class SMDPAgent:
 
         self.optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=10.0)
+        torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=1.0)
         self.optimizer.step()
 
         self.steps_done += 1
         self._update_epsilon()
         
-        if self.steps_done % 100 == 0:
-            self._check_and_save_record()
 
         if self.steps_done % self.log_interval == 0:
             self._log_step(loss.item(), rewards.mean().item())
@@ -210,7 +266,7 @@ class SMDPAgent:
         """Добавляет переход в буфер воспроизведения."""
         # Клиппинг награды стабилизирует диапазон target_q.
         reward_for_training = max(-10.0, min(10.0, reward))
-        self.episode_reward += reward
+        self.episode_reward += reward_for_training
         self.memory.push(state, action, reward_for_training, next_state, done, tau)
 
     def _update_epsilon(self):
@@ -306,9 +362,20 @@ class SMDPAgent:
             )
             f.flush()
             os.fsync(f.fileno())
+
+        # Фиксируем прогресс после каждого матча,
+        # чтобы следующий матч не стартовал с более старого checkpoints.
+        self.save_weights(self.agent_checkpoint)
+
+        # Сравниваем финальную награду матча с рекордом и обновляем мастер-веса.
+        self._check_and_save_record()
     
-    def _check_and_save_record(self):
-        """Страховка: сохраняем рекорд ПРЯМО ВО ВРЕМЯ МАТЧА."""
+    def _check_and_save_record(self, episode_reward: float = None):
+        """Сохраняем рекорд в конце матча — сравниваем финальную награду эпизода с историческим максимумом.
+        episode_reward передаётся из C++ (неклиппированное значение) для точного сравнения."""
+        if episode_reward is None:
+            episode_reward = self.episode_reward
+
         record_file = os.path.join(self.logs_path, f"record_agent_{self.agent_id}.json")
         personal_weights_path = os.path.join(self.logs_path, f"best_weights_agent_{self.agent_id}.pth")
 
@@ -320,10 +387,9 @@ class SMDPAgent:
             except json.JSONDecodeError:
                 pass
 
-        # Если текущая накопленная награда УЖЕ больше рекорда — сохраняем!
-        if self.episode_reward > personal_best:
+        if episode_reward > personal_best:
             with open(record_file, "w") as f:
-                json.dump({"best_reward": self.episode_reward, "steps_done": self.steps_done}, f)
+                json.dump({"best_reward": episode_reward, "steps_done": self.steps_done}, f)
             
             self.save_weights(personal_weights_path)
             self.save_weights(self.role_master_path)

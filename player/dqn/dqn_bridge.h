@@ -3,6 +3,7 @@
 #include <vector>
 #include <string>
 #include <memory>
+#include <array>
 
 /**
  * DQNBridge — связующий программный интерфейс между базовым агентом C++
@@ -81,6 +82,27 @@ public:
      * Логирование итога матча (счет + эпизодическая награда).
      */
     void logEpisodeResult(int our_score, int opp_score);
+
+    /**
+     * Сохранение лучших весов если текущий эпизод побил рекорд.
+     * Вызывается в конце каждого матча из finalizeEpisode().
+     */
+    void saveRecordIfBest();
+
+    // Конфигурация runtime, считанная из config.json через Python agent.
+    double rewardGamma() const;
+    double rewardW1() const;
+    double rewardW2() const;
+    double rewardGoal() const;
+    double rewardKickableBonus() const;
+    double rewardOwnHalfPenalty() const;
+    std::array<int, 8> maxTauByAction() const;
+    int matchEndCycle() const;
+    const std::string& logsPath() const;
+    void addEpisodeReward(double reward);
+    int stepsDone() const;
+    double epsilon() const;
+    int agentId() const;
 
 private:
     struct Impl;

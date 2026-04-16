@@ -62,6 +62,9 @@
 #include <sstream>
 #include <string>
 #include <cstdlib>
+#include <fstream>
+#include <iomanip>
+#include <algorithm>
 
 using namespace rcsc;
 
@@ -69,7 +72,7 @@ using namespace rcsc;
 // Пути к конфигурации и Python модулям
 // Задаются относительно рабочей директории запуска агента
 // ---------------------------------------------------------------------------
-static const std::string DQN_CONFIG_PATH = "/Users/laaimak/Desktop/VKR/python_dqn/config.json";
+static const std::string DQN_CONFIG_PATH = "/Users/laaimak/Desktop/VKR/python_dqn/config_defender.json";
 static const std::string DQN_MODULE_DIR  = "/Users/laaimak/Desktop/VKR/python_dqn";
 
 // Вратарь (unum=1) управляется FSM helios, не DQN
@@ -87,6 +90,7 @@ SamplePlayer::SamplePlayer()
     , M_last_state()
     , M_last_action(0)
     , M_macro_active(false)
+    , M_goal_event_consumed(false)
 {
     M_field_evaluator = createFieldEvaluator();
     M_action_generator = createActionGenerator();
@@ -123,6 +127,7 @@ SamplePlayer::SamplePlayer()
 
 SamplePlayer::~SamplePlayer()
 {
+    finalizeEpisode(false);
     // DQN Bridge освобождается через unique_ptr автоматически
 }
 
@@ -177,17 +182,36 @@ void SamplePlayer::initDQNIfNeeded()
     if (world().self().goalie()) return;
 
     int unum = world().self().unum();
+    int agent_id = unum;
+
+    if (const char* forced_id = std::getenv("AGENT_FORCE_ID")) {
+        const int parsed = std::atoi(forced_id);
+        if (parsed > 0) {
+            agent_id = parsed;
+        }
+    }
 
     try {
         M_dqn_bridge = std::make_unique<DQNBridge>(
-            unum, DQN_CONFIG_PATH, DQN_MODULE_DIR
+            agent_id, DQN_CONFIG_PATH, DQN_MODULE_DIR
         );
+
+        M_max_tau_by_action = M_dqn_bridge->maxTauByAction();
+        M_match_end_cycle = M_dqn_bridge->matchEndCycle();
         M_reward_evaluator = std::make_unique<RewardEvaluator>(
-            0.99, 1.0, 0.001, 100.0, 5.0
+            M_dqn_bridge->rewardGamma(),
+            M_dqn_bridge->rewardW1(),
+            M_dqn_bridge->rewardW2(),
+            M_dqn_bridge->rewardGoal(),
+            M_dqn_bridge->rewardKickableBonus(),
+            M_dqn_bridge->rewardOwnHalfPenalty()
         );
+        M_dqn_bridge->resetEpisode();
+        M_episode_finalized = false;
         
         // M_dqn_bridge->loadEliteWeights(); // Отключено: используем индивидуальные веса
-        std::cerr << "[SamplePlayer] DQN initialized for agent " << unum << std::endl;
+        std::cerr << "[SamplePlayer] DQN initialized: unum=" << unum
+              << " agent_id=" << agent_id << std::endl;
     }
     catch (const std::exception& e) {
         std::cerr << "[SamplePlayer] DQN init failed: " << e.what() << std::endl;
@@ -246,17 +270,10 @@ bool SamplePlayer::isMacroActionDone(const WorldModel& wm) const
 // ---------------------------------------------------------------------------
 int SamplePlayer::getMaxTau(int action) const
 {
-    switch (action) {
-    case 1: return 10;  // shoot
-    case 2: return 10;  // pass
-    case 3: return 20;  // dribble
-    case 4: return 10;  // clear
-    case 5: return 15;  // hold
-    case 6: return 30;  // intercept
-    case 7: return 20;  // block
-    case 8: return 40;  // positioning
-    default: return 20;
+    if (action >= 1 && action <= 8) {
+        return M_max_tau_by_action[static_cast<std::size_t>(action - 1)];
     }
+    return 20;
 }
 
 // ---------------------------------------------------------------------------
@@ -350,6 +367,117 @@ bool SamplePlayer::executeMacroAction(int action)
 }
 
 // ---------------------------------------------------------------------------
+// Финализация эпизода и запись итогов матча
+// ---------------------------------------------------------------------------
+void SamplePlayer::finalizeEpisode(bool terminate_process)
+{
+    if (!M_dqn_bridge || M_episode_finalized) {
+        return;
+    }
+
+    const WorldModel& wm = world();
+
+    std::cerr << "--- FINAL SAVING START ---" << std::endl;
+
+    int our_score = (wm.ourSide() == rcsc::LEFT)
+        ? wm.gameMode().scoreLeft()
+        : wm.gameMode().scoreRight();
+    int opp_score = (wm.ourSide() == rcsc::LEFT)
+        ? wm.gameMode().scoreRight()
+        : wm.gameMode().scoreLeft();
+
+    const double r_goal = M_dqn_bridge->rewardGoal();
+    const double goal_terminal = (our_score - opp_score) * r_goal;
+
+    // Последний переход: шейпинг + терминальная награда за голы → в replay buffer
+    if (M_macro_active && M_reward_evaluator
+        && !M_last_state.empty() && M_last_action > 0) {
+        int tau = 0;
+        const double shaping_reward = M_reward_evaluator->getFinalRewardAndReset(tau);
+        const double total_final_reward = shaping_reward + goal_terminal;
+        const std::vector<double> current_state = StateBuilder::getState(wm);
+        M_dqn_bridge->pushAndTrain(
+            M_last_state, M_last_action, total_final_reward, current_state, true, tau);
+        M_dqn_bridge->addEpisodeReward(total_final_reward);
+        std::cerr << "[FINAL] pushAndTrain: shaping=" << shaping_reward
+                  << " goal=" << goal_terminal
+                  << " total=" << total_final_reward
+                  << " tau=" << tau << std::endl;
+    } else {
+        // Макро не активно — только логируем goal_terminal
+        M_dqn_bridge->addEpisodeReward(goal_terminal);
+        std::cerr << "[FINAL] goal_terminal=" << goal_terminal
+                  << " our=" << our_score << " opp=" << opp_score << std::endl;
+    }
+
+    const double episode_reward = M_dqn_bridge->getEpisodeReward();
+
+    const std::string episode_log_path =
+        M_dqn_bridge->logsPath()
+        + "/" + "agent_"
+        + std::to_string(M_dqn_bridge->agentId())
+        + "_episode_rewards.csv";
+
+    bool file_has_content = false;
+    {
+        std::ifstream check_file(episode_log_path.c_str());
+        file_has_content = check_file.good() && check_file.peek() != std::ifstream::traits_type::eof();
+    }
+
+    int match_id = 1;
+    if (file_has_content) {
+        std::ifstream in_file(episode_log_path.c_str());
+        std::string line;
+        int last_match_id = 0;
+        while (std::getline(in_file, line)) {
+            if (line.empty()) {
+                continue;
+            }
+            if (!std::isdigit(static_cast<unsigned char>(line[0]))) {
+                continue; // skip header or malformed lines
+            }
+            const std::size_t comma_pos = line.find(',');
+            if (comma_pos == std::string::npos) {
+                continue;
+            }
+            const int parsed_id = std::atoi(line.substr(0, comma_pos).c_str());
+            if (parsed_id > last_match_id) {
+                last_match_id = parsed_id;
+            }
+        }
+        match_id = last_match_id + 1;
+    }
+
+    {
+        std::ofstream out_file(episode_log_path.c_str(), std::ios::app);
+        if (!file_has_content) {
+            out_file << "Match,EpisodeReward,ScoreFor,ScoreAgainst,StepsDone,Epsilon\n";
+        }
+        out_file << match_id << ','
+                 << std::fixed << std::setprecision(6) << episode_reward << ','
+                 << our_score << ','
+                 << opp_score << ','
+                 << M_dqn_bridge->stepsDone() << ','
+                 << std::fixed << std::setprecision(4) << M_dqn_bridge->epsilon() << '\n';
+        out_file.flush();
+    }
+
+    std::cout << "Score: " << our_score << " - " << opp_score << std::endl;
+    std::cout.flush();
+
+    M_dqn_bridge->saveRecordIfBest();
+
+    std::cerr << "--- DISCONNECTING ---" << std::endl;
+
+    M_episode_finalized = true;
+
+    if (terminate_process) {
+        std::fflush(nullptr);
+        std::_Exit(0);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Главный цикл принятия решений
 // ---------------------------------------------------------------------------
 void SamplePlayer::actionImpl()
@@ -395,7 +523,9 @@ void SamplePlayer::actionImpl()
     }
 
     // Режим set-play: используем стандартный helios
+    // AfterGoal_ исключаем — он обрабатывается ниже в goal-блоке DQN
     if (world().gameMode().type() != GameMode::PlayOn
+        && world().gameMode().type() != GameMode::AfterGoal_
         && role_ptr->acceptExecution(world())) {
         role_ptr->execute(this);
         return;
@@ -433,7 +563,7 @@ void SamplePlayer::actionImpl()
             StateBuilder::getTargetPosition(wm, tactical_pos);
 
         // Конец матча
-        bool done = (wm.time().cycle() >= 6000);
+        bool done = (wm.time().cycle() >= M_match_end_cycle - 2);
 
         // -------------------------------------------------------------------
         // Проверяем завершение текущего макро-действия
@@ -444,7 +574,7 @@ void SamplePlayer::actionImpl()
 
         bool transition_pushed_this_cycle = false;
 
-        if (macro_done && M_macro_active) {
+        if (macro_done && M_macro_active && !done) {
             // Получаем итоговую накопленную награду R_t и длительность tau
             int    tau          = 0;
             double final_reward = M_reward_evaluator->getFinalRewardAndReset(tau);
@@ -458,11 +588,11 @@ void SamplePlayer::actionImpl()
                 M_last_action,
                 final_reward,
                 current_state,
-                done,
+                false,
                 tau
             );
             transition_pushed_this_cycle = true;
-            std::cerr << "[DEBUG] pushAndTrain called. tau=" << tau 
+            std::cerr << "[DEBUG] pushAndTrain called. tau=" << tau
                     << " reward=" << final_reward << std::endl;
         }
 
@@ -472,9 +602,18 @@ void SamplePlayer::actionImpl()
 
             // Выбираем новое макро-действие по ε-жадной стратегии
             M_current_macro_action = M_dqn_bridge->act(M_last_state);
+            if (!wm.self().isKickable()
+                && (M_current_macro_action == 1
+                    || M_current_macro_action == 2
+                    || M_current_macro_action == 4)) {
+                // Без владения мячом ударные макро-действия вырождаются в tau=1,
+                // поэтому принудительно уходим в перехват.
+                M_current_macro_action = 6;
+            }
             M_last_action          = M_current_macro_action;
             M_macro_action_timer   = 0;
             M_macro_active         = true;
+            M_goal_event_consumed  = false;
 
             // Инициализируем накопление награды для нового макро-действия
             M_reward_evaluator->startMacroAction(wm, target_pos);
@@ -491,45 +630,13 @@ void SamplePlayer::actionImpl()
         // Обрабатываем конец матча
         // Обрабатываем конец матча
         if (done) {
-            std::cerr << "--- FINAL SAVING START ---" << std::endl;
-
-            // Если матч завершился до формального конца макро-действия,
-            // принудительно сбрасываем финальный переход.
-            if (M_macro_active && !transition_pushed_this_cycle) {
-                int tau = 0;
-                double final_reward = M_reward_evaluator->getFinalRewardAndReset(tau);
-                std::vector<double> terminal_state = StateBuilder::getState(wm);
-                M_dqn_bridge->pushAndTrain(
-                    M_last_state,
-                    M_last_action,
-                    final_reward,
-                    terminal_state,
-                    true,
-                    tau
-                );
-            }
-
-            if (M_dqn_bridge) {
-                M_dqn_bridge->saveEliteIfBest({{wm.self().unum(), M_dqn_bridge->getEpisodeReward()}});
-            }
-            
-            // Вычисляем и печатаем счет
-            int our_score = (wm.ourSide() == rcsc::LEFT) ? wm.gameMode().scoreLeft() : wm.gameMode().scoreRight();
-            int opp_score = (wm.ourSide() == rcsc::LEFT) ? wm.gameMode().scoreRight() : wm.gameMode().scoreLeft();
-
-            if (M_dqn_bridge) {
-                M_dqn_bridge->logEpisodeResult(our_score, opp_score);
-            }
-            
-            std::cout << "Score: " << our_score << " - " << opp_score << std::endl;
-            std::cout.flush(); 
-            
-            std::cerr << "--- DISCONNECTING ---" << std::endl;
-            std::_Exit(0); 
+            finalizeEpisode(true);
+            return;
         }
         
         return;
     }
+
 
     // =======================================================================
     // Прочие режимы (penalty kick, set play)
@@ -550,6 +657,14 @@ void SamplePlayer::handlePlayerType()   {}
 
 void SamplePlayer::handleActionEnd()
 {
+    if (!M_episode_finalized
+        && M_dqn_bridge
+        && world().self().unum() != GOALIE_UNUM
+        && world().time().cycle() >= M_match_end_cycle - 2) {
+        finalizeEpisode(true);
+        return;
+    }
+
     if (world().self().posValid()) {
         debugClient().addLine(
             Vector2D(world().ourDefenseLineX(),
