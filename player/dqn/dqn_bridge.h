@@ -32,9 +32,6 @@ public:
                       bool done,
                       int tau);
 
-    // Parameter Sharing: сравнение вознаграждений всех агентов.
-    void saveEliteIfBest(const std::vector<std::pair<int, double>>& all_rewards);
-
     // Загрузка весов элитного агента в начале нового матча.
     void loadEliteWeights();
 

@@ -296,34 +296,6 @@ class SMDPAgent:
             print(f"[Agent {self.agent_id}] Загружен чекпоинт из {os.path.basename(path)}.")
             print(f"[Agent {self.agent_id}] Продолжаем. Шаги: {self.steps_done}, Эпсилон: {self.epsilon:.4f}")
             
-    def save_elite_if_best(self, all_rewards: dict):
-        """Индивидуальное сохранение весов: бьем собственный исторический рекорд."""
-        match_reward = all_rewards.get(self.agent_id, -float('inf'))
-        
-        # Файлы для конкретного агента
-        record_file = os.path.join(self.logs_path, f"record_agent_{self.agent_id}.json")
-        personal_weights_path = os.path.join(self.logs_path, f"best_weights_agent_{self.agent_id}.pth")
-        
-        personal_best = -float('inf')
-        if os.path.exists(record_file):
-            try:
-                with open(record_file, "r") as f:
-                    personal_best = json.load(f).get("best_reward", -float('inf'))
-            except json.JSONDecodeError:
-                pass
-        
-        if match_reward > personal_best:
-            with open(record_file, "w") as f:
-                json.dump({"best_reward": match_reward, "steps_done": self.steps_done}, f)
-            
-            self.save_weights(personal_weights_path)
-            
-            self.save_weights(self.role_master_path) 
-            print(f"[Agent {self.agent_id}] Мастер-веса роли {self.role} обновлены!")
-        else:
-            print(f"[Agent {self.agent_id}] Личный рекорд не побит. "
-                  f"(Текущий: {match_reward:.2f}, Рекорд: {personal_best:.2f})")
-
     def reset_episode(self):
         self.episode_reward = 0.0
 

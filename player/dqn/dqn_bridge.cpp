@@ -165,25 +165,6 @@ void DQNBridge::pushAndTrain(const std::vector<double>& state,
 
 // ---------------------------------------------------------------------------
 
-void DQNBridge::saveEliteIfBest(
-    const std::vector<std::pair<int, double>>& all_rewards)
-{
-    try {
-        py::gil_scoped_acquire gil;
-
-        py::dict rewards_dict;
-        for (const auto& [id, r] : all_rewards) {
-            rewards_dict[py::int_(id)] = py::float_(r);
-        }
-        pImpl->agent.attr("save_elite_if_best")(rewards_dict);
-    }
-    catch (const py::error_already_set& e) {
-        std::cerr << "[DQNBridge] saveEliteIfBest() error: " << e.what() << std::endl;
-    }
-}
-
-// ---------------------------------------------------------------------------
-
 void DQNBridge::saveRecordIfBest()
 {
     try {
