@@ -44,7 +44,6 @@ class ReplayBuffer:
              tau: int):
 
         # Сохраняет кортеж перехода в буфер.
-
         self.buffer.append((state, action, reward, next_state, done, tau))
 
     def sample(self, batch_size: int) -> Tuple[torch.Tensor, ...]:
