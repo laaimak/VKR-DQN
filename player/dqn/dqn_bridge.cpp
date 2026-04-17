@@ -8,8 +8,7 @@
 
 namespace py = pybind11;
 
-// Глобальный интерпретатор Python — создаётся один раз на весь процесс
-// Используем счётчик ссылок чтобы не создавать повторно
+// Глобальный интерпретатор Python
 static int s_interpreter_ref_count = 0;
 static py::scoped_interpreter* s_interpreter = nullptr;
 
@@ -18,7 +17,7 @@ struct DQNBridge::Impl {
     std::string config_path;
     std::string elite_weights_path;
     std::string logs_path;
-    py::object  agent;       // экземпляр SMDPAgent
+    py::object  agent;
     double      episode_reward = 0.0;
     double      reward_gamma = 0.99;
     double      reward_w1 = 1.0;
@@ -37,7 +36,6 @@ struct DQNBridge::Impl {
         : agent_id(agent_id)
         , config_path(config_path)
     {
-        // Инициализируем интерпретатор Python один раз
         if (s_interpreter_ref_count == 0) {
             s_interpreter = new py::scoped_interpreter{};
         }
@@ -46,17 +44,14 @@ struct DQNBridge::Impl {
         try {
             py::gil_scoped_acquire gil;
 
-            // Добавляем директорию с Python модулями в sys.path
-            // Добавляем пути venv314
             py::module_ sys = py::module_::import("sys");
             sys.attr("path").attr("insert")(0, "/Users/laaimak/Desktop/VKR/.venv314/lib/python3.14/site-packages");
             sys.attr("path").attr("insert")(0, module_dir);
 
-            // Импортируем модуль агента
             py::module_ agent_module = py::module_::import("agent");
 
-            // Создаём экземпляр SMDPAgent для данного агента
-            // Каждый агент имеет свой независимый экземпляр — парадигма IQL
+            // Создаём экземпляр SMDPAgent для агента
+            // Каждый агент имеет свой независимый экземпляр — IQL
             agent = agent_module.attr("SMDPAgent")(agent_id, config_path);
 
             // Читаем путь к файлу элитных весов из конфига
@@ -69,7 +64,7 @@ struct DQNBridge::Impl {
                                     .cast<std::string>();
             logs_path = cfg["training"]["logs_path"].cast<std::string>();
 
-            // Runtime-параметры для C++ (reward + max tau) берем из Python-агента.
+            // Runtime-параметры для C++
             py::dict rt = agent.attr("get_runtime_params")().cast<py::dict>();
             reward_gamma = rt["gamma"].cast<double>();
             reward_w1 = rt["w1"].cast<double>();
@@ -102,8 +97,7 @@ struct DQNBridge::Impl {
 
     ~Impl() {
         try {
-            // Не трогаем Python на teardown: процесс завершается сразу после матча,
-            // а cleanup через pybind11 на macOS уже приводил к abort trap.
+
         }
         catch (const std::exception& e) {
             std::cerr << "[DQNBridge] ~Impl() cleanup warning: " << e.what() << std::endl;
@@ -113,8 +107,6 @@ struct DQNBridge::Impl {
     }
 };
 
-// ---------------------------------------------------------------------------
-
 DQNBridge::DQNBridge(int agent_id,
                      const std::string& config_path,
                      const std::string& module_dir)
@@ -123,21 +115,18 @@ DQNBridge::DQNBridge(int agent_id,
 
 DQNBridge::~DQNBridge() = default;
 
-// ---------------------------------------------------------------------------
 
 int DQNBridge::act(const std::vector<double>& state)
 {
     try {
         py::gil_scoped_acquire gil;
 
-        // Преобразуем double → float (PyTorch использует float32)
         std::vector<float> state_f(state.begin(), state.end());
         py::object result = pImpl->agent.attr("act")(state_f);
         return result.cast<int>();
     }
     catch (const py::error_already_set& e) {
         std::cerr << "[DQNBridge] act() error: " << e.what() << std::endl;
-        // Возвращаем действие по умолчанию (positioning) при ошибке
         return 8;
     }
 }
@@ -157,7 +146,7 @@ void DQNBridge::pushAndTrain(const std::vector<double>& state,
         std::vector<float> state_f(state.begin(), state.end());
         std::vector<float> next_f(next_state.begin(), next_state.end());
 
-        // Сохраняем кортеж перехода e^i_t = (s^i_t, o^i_t, R^i_t, s^i_{t+tau}, tau^i_t)
+        // Сохраняем кортеж перехода
         pImpl->agent.attr("push_transition")(
             state_f, action, (float)reward, next_f, done, tau
         );
@@ -182,7 +171,6 @@ void DQNBridge::saveEliteIfBest(
     try {
         py::gil_scoped_acquire gil;
 
-        // Преобразуем в Python dict: {agent_id: reward}
         py::dict rewards_dict;
         for (const auto& [id, r] : all_rewards) {
             rewards_dict[py::int_(id)] = py::float_(r);
@@ -224,7 +212,6 @@ void DQNBridge::loadEliteWeights()
     }
 }
 
-// ---------------------------------------------------------------------------
 
 void DQNBridge::resetEpisode()
 {
@@ -239,14 +226,12 @@ void DQNBridge::resetEpisode()
     }
 }
 
-// ---------------------------------------------------------------------------
 
 double DQNBridge::getEpisodeReward() const
 {
     return pImpl->episode_reward;
 }
 
-// ---------------------------------------------------------------------------
 
 void DQNBridge::logEpisodeResult(int our_score, int opp_score)
 {

@@ -1,10 +1,3 @@
-// -*-c++-*-
-
-/*
- * Copyright: Hidehisa AKIYAMA
- * Modified for DQN integration
- */
-
 #ifndef SAMPLE_PLAYER_H
 #define SAMPLE_PLAYER_H
 
@@ -33,8 +26,6 @@ private:
     FieldEvaluator::ConstPtr  M_field_evaluator;
     ActionGenerator::ConstPtr M_action_generator;
 
-    // DQN модуль — интегрирован как разделяемая библиотека через pybind11
-    // Каждый экземпляр SamplePlayer имеет собственный DQNBridge — парадигма IQL
     std::unique_ptr<DQNBridge>      M_dqn_bridge;
     std::unique_ptr<RewardEvaluator> M_reward_evaluator;
 
@@ -74,7 +65,7 @@ protected:
 
 private:
 
-    // Ленивая инициализация DQN (вызывается при первом такте PlayOn)
+    // Инициализация DQN при первом такте PlayOn
     void initDQNIfNeeded();
 
     // Условие досрочного завершения макро-действия
@@ -84,7 +75,6 @@ private:
     int getMaxTau(int action) const;
 
     // Выполнение выбранного макро-действия
-    // Возвращает true, если удалось выставить body-команду
     bool executeMacroAction(int action);
 
     void finalizeEpisode(bool terminate_process);

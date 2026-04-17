@@ -6,7 +6,7 @@
 /**
  * Формирует вектор состояния s_t размерностью 18.
  *
- * Компоненты вектора (согласно Таблице 1 математической модели):
+ * Компоненты вектора:
  *
  *  [0]     d_b      — евклидово расстояние до мяча              [0, ~125]
  *  [1]     theta_b  — относительный угол до мяча                [-180, 180]
@@ -17,10 +17,6 @@
  *  [6-15]  d_k, theta_k (K=5) — расстояния и углы до K ближайших игроков
  *  [16]    stam_t   — текущий запас выносливости                [0, 8000]
  *  [17]    v_t      — текущая скалярная скорость агента         [0, 1.2]
- *
- * Для объектов, не обнаруженных в текущем такте, используются последние
- * известные координаты (аппроксимация полного вектора состояния в
- * условиях частичной наблюдаемости).
  *
  * Параметр K=5 фиксирован для обеспечения постоянной размерности
  * входного вектора нейронной сети: dim(s_t) = 18.
@@ -50,7 +46,6 @@ std::vector<double> StateBuilder::getState(const rcsc::WorldModel& wm)
     state.push_back(wm.self().pos().y);
 
     // --- [6-15] K=5 ближайших игроков (союзники + противники) ---
-    // Собираем всех игроков кроме себя
     std::vector<const rcsc::AbstractPlayerObject*> players;
     players.reserve(21);
 
@@ -60,7 +55,6 @@ std::vector<double> StateBuilder::getState(const rcsc::WorldModel& wm)
         }
     }
 
-    // Сортируем по расстоянию от агента
     std::sort(players.begin(), players.end(),
         [](const rcsc::AbstractPlayerObject* a,
            const rcsc::AbstractPlayerObject* b) {
@@ -69,7 +63,6 @@ std::vector<double> StateBuilder::getState(const rcsc::WorldModel& wm)
 
     // Берём K=5 ближайших
     // Для игроков не обнаруженных в текущем такте — используем заглушки
-    // (максимальная дальность, нулевой угол)
     const int K = 5;
     for (int i = 0; i < K; ++i) {
         if (i < static_cast<int>(players.size())
@@ -122,7 +115,6 @@ rcsc::Vector2D StateBuilder::getTargetPosition(
     for (const rcsc::PlayerObject* tm : wm.teammates()) {
         if (!tm) continue;
         if (tm->unum() == wm.self().unum()) continue;
-        // Вратарь (unum=1) не конкурирует за мяч с полевыми игроками
         if (tm->unum() == 1) continue;
 
         if (tm->pos().dist(wm.ball().pos()) < my_dist) {
@@ -132,10 +124,8 @@ rcsc::Vector2D StateBuilder::getTargetPosition(
     }
 
     if (i_am_closest) {
-        // target_i = C_ball — преследуем мяч
         return wm.ball().pos();
     } else {
-        // target_i = P_i — идём на тактическую позицию
         return tactical_pos;
     }
 }

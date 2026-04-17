@@ -37,7 +37,7 @@ void RewardEvaluator::updateStep(const rcsc::WorldModel& wm, const rcsc::Vector2
     double shaping_reward = 0.0;
     int unum = wm.self().unum();
 
-    // РОЛЬ: НАПАДАЮЩИЙ (Номера 10 и 11)
+    // Нападающие - №10 и №11
     if (unum == 10 || unum == 11) {
         double delta_dist = M_last_distance - current_distance;
         double delta_stamina = std::max(0.0, M_last_stamina - current_stamina);
@@ -46,37 +46,35 @@ void RewardEvaluator::updateStep(const rcsc::WorldModel& wm, const rcsc::Vector2
         if (wm.self().isKickable()) shaping_reward += M_kickable_bonus;
         if (wm.self().isFrozen()) shaping_reward -= 10.0;
         
-        // Штраф за свою половину поля (гоним его в атаку)
+        // Штраф за свою половину поля
         if (wm.gameMode().type() == rcsc::GameMode::PlayOn && wm.ball().pos().x < 0.0) {
             shaping_reward -= M_own_half_penalty;
         }
     }
-    // РОЛЬ: ЗАЩИТНИК (Номера 2, 3, 4, 5)
+    // Защитник - №2, №3, №4, №5
     else if (unum >= 2 && unum <= 5) {
         
-        // 1. Награда за владение мячом (перехват/отбор)
+        // 1. Награда за владение мячом
         if (wm.self().isKickable()) {
-            shaping_reward += M_kickable_bonus * 2.0; // Защитнику важнее отбирать мяч
+            shaping_reward += M_kickable_bonus * 2.0;
         }
         
         // 2. Штраф, если мяч слишком близко к нашим воротам
         double dist_to_our_goal = wm.ball().pos().dist(rcsc::Vector2D(-52.5, 0.0));
         if (dist_to_our_goal < 20.0) {
-            shaping_reward -= 0.05; // Бьем тревогой, мяч в опасной зоне!
+            shaping_reward -= 0.05;
         }
         
         // 3. Награда за вынос мяча
-        // Для простоты пока даем бонус, если мяч перешел центр поля
         if (wm.ball().pos().x > 0.0) {
-            shaping_reward += 0.01; // Мяч выбит, можно выдохнуть
+            shaping_reward += 0.01;
         }
     }
-    // РОЛЬ: ПОЛУЗАЩИТНИК (Номера 6, 7, 8, 9)
+    // Полузащитник - №6, №7, №8, №9)
     else if (unum >= 6 && unum <= 9) {
         double delta_dist = M_last_distance - current_distance;
         double delta_stamina = std::max(0.0, M_last_stamina - current_stamina);
 
-        // Полузащитники должны поддерживать переход фазы: прессинг + продвижение.
         shaping_reward = 0.7 * M_w1 * delta_dist - 0.8 * M_w2 * delta_stamina;
 
         if (wm.self().isKickable()) {
@@ -84,7 +82,6 @@ void RewardEvaluator::updateStep(const rcsc::WorldModel& wm, const rcsc::Vector2
         }
     }
 
-    // Ограничиваем только shaping-компоненту, чтобы не резать терминальный сигнал r_goal.
     shaping_reward = std::clamp(shaping_reward, -10.0, 10.0);
 
     M_accumulated_reward += std::pow(M_gamma, M_current_tau) * shaping_reward;
@@ -111,7 +108,6 @@ double RewardEvaluator::terminalGoalReward(const rcsc::WorldModel& wm) const
     }
 
     if (unum >= 2 && unum <= 5) {
-        // Для защиты ключевой сигнал — сильный штраф за пропущенный мяч.
         return our_goal ? 0.0 : -M_r_goal;
     }
 

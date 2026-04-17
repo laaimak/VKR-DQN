@@ -42,23 +42,13 @@ class ReplayBuffer:
              next_state: list,
              done: bool,
              tau: int):
-        """
-        Сохраняет кортеж перехода в буфер.
 
-        state:      вектор состояния s^i_t (18 признаков)
-        action:     макро-действие o^i_t (1-8)
-        reward:     накопленная дисконтированная награда R^i_t
-        next_state: вектор состояния s^i_{t+tau}
-        done:       флаг терминального состояния
-        tau:        длительность макро-действия tau^i_t
-        """
+        # Сохраняет кортеж перехода в буфер.
+
         self.buffer.append((state, action, reward, next_state, done, tau))
 
     def sample(self, batch_size: int) -> Tuple[torch.Tensor, ...]:
-        """
-        Случайная выборка мини-батча из буфера.
-        Устраняет корреляции между последовательными наблюдениями.
-        """
+        # Случайная выборка мини-батча из буфера.
         batch = random.sample(self.buffer, batch_size)
         state, action, reward, next_state, done, tau = map(np.stack, zip(*batch))
 

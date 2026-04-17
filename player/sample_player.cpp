@@ -1,10 +1,3 @@
-// -*-c++-*-
-
-/*
- * Copyright: Hidehisa AKIYAMA
- * Modified for DQN integration: pybind11 bridge replaces TCP client
- */
-
 #ifdef HAVE_CONFIG_H
 #include <config.h>
 #endif
@@ -68,17 +61,11 @@
 
 using namespace rcsc;
 
-// ---------------------------------------------------------------------------
-// Пути к конфигурации и Python модулям
-// Задаются относительно рабочей директории запуска агента
-// ---------------------------------------------------------------------------
 static const std::string DQN_CONFIG_PATH = "/Users/laaimak/Desktop/VKR/python_dqn/config_defender.json";
 static const std::string DQN_MODULE_DIR  = "/Users/laaimak/Desktop/VKR/python_dqn";
 
-// Вратарь (unum=1) управляется FSM helios, не DQN
 static const int GOALIE_UNUM = 1;
 
-// ---------------------------------------------------------------------------
 
 SamplePlayer::SamplePlayer()
     : PlayerAgent()
@@ -128,10 +115,8 @@ SamplePlayer::SamplePlayer()
 SamplePlayer::~SamplePlayer()
 {
     finalizeEpisode(false);
-    // DQN Bridge освобождается через unique_ptr автоматически
 }
 
-// ---------------------------------------------------------------------------
 
 bool SamplePlayer::initImpl(CmdLineParser& cmd_parser)
 {
@@ -167,10 +152,7 @@ bool SamplePlayer::initImpl(CmdLineParser& cmd_parser)
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// Ленивая инициализация DQN Bridge
-// Вызывается при первом такте PlayOn чтобы знать unum агента
-// ---------------------------------------------------------------------------
+// Инициализация DQN Bridge при первом такте PlayOn
 void SamplePlayer::initDQNIfNeeded()
 {
     if (M_dqn_bridge) return;
@@ -209,20 +191,17 @@ void SamplePlayer::initDQNIfNeeded()
         M_dqn_bridge->resetEpisode();
         M_episode_finalized = false;
         
-        // M_dqn_bridge->loadEliteWeights(); // Отключено: используем индивидуальные веса
         std::cerr << "[SamplePlayer] DQN initialized: unum=" << unum
               << " agent_id=" << agent_id << std::endl;
     }
     catch (const std::exception& e) {
         std::cerr << "[SamplePlayer] DQN init failed: " << e.what() << std::endl;
         M_dqn_bridge.reset();
-        M_dqn_init_failed = true;  // больше не пробуем
+        M_dqn_init_failed = true;
     }
 }
 
-// ---------------------------------------------------------------------------
 // Условия досрочного завершения макро-действия
-// ---------------------------------------------------------------------------
 bool SamplePlayer::isMacroActionDone(const WorldModel& wm) const
 {
     switch (M_current_macro_action) {
@@ -250,7 +229,7 @@ bool SamplePlayer::isMacroActionDone(const WorldModel& wm) const
         return wm.self().isKickable();
 
     case 7: // block — завершается когда агент встал между противником
-            //         и воротами (упрощённо: dist до мяча < 2м)
+            //         и воротами
         return wm.self().pos().dist(wm.ball().pos()) < 2.0;
 
     case 8: // positioning — завершается когда агент достиг позиции P_i
@@ -265,9 +244,7 @@ bool SamplePlayer::isMacroActionDone(const WorldModel& wm) const
     }
 }
 
-// ---------------------------------------------------------------------------
-// Максимальная длительность каждого макро-действия (в тактах)
-// ---------------------------------------------------------------------------
+// Максимальная длительность каждого макро-действия
 int SamplePlayer::getMaxTau(int action) const
 {
     if (action >= 1 && action <= 8) {
@@ -276,9 +253,7 @@ int SamplePlayer::getMaxTau(int action) const
     return 20;
 }
 
-// ---------------------------------------------------------------------------
 // Выполнение макро-действия
-// ---------------------------------------------------------------------------
 bool SamplePlayer::executeMacroAction(int action)
 {
     const WorldModel& wm = world();
@@ -366,9 +341,7 @@ bool SamplePlayer::executeMacroAction(int action)
     return executed;
 }
 
-// ---------------------------------------------------------------------------
 // Финализация эпизода и запись итогов матча
-// ---------------------------------------------------------------------------
 void SamplePlayer::finalizeEpisode(bool terminate_process)
 {
     if (!M_dqn_bridge || M_episode_finalized) {
@@ -434,7 +407,7 @@ void SamplePlayer::finalizeEpisode(bool terminate_process)
                 continue;
             }
             if (!std::isdigit(static_cast<unsigned char>(line[0]))) {
-                continue; // skip header or malformed lines
+                continue;
             }
             const std::size_t comma_pos = line.find(',');
             if (comma_pos == std::string::npos) {
@@ -477,9 +450,7 @@ void SamplePlayer::finalizeEpisode(bool terminate_process)
     }
 }
 
-// ---------------------------------------------------------------------------
 // Главный цикл принятия решений
-// ---------------------------------------------------------------------------
 void SamplePlayer::actionImpl()
 {
     if (this->audioSensor().trainerMessageTime() == world().time()) {
@@ -537,15 +508,12 @@ void SamplePlayer::actionImpl()
         return;
     }
 
-    // =======================================================================
     // DQN управление полевыми игроками в режиме PlayOn
-    // =======================================================================
     if (world().gameMode().type() == GameMode::PlayOn) {
 
-        // Ленивая инициализация DQN при первом такте
+        // Инициализация DQN при первом такте
         initDQNIfNeeded();
 
-        // Если DQN недоступен — fallback на helios FSM
         if (!M_dqn_bridge) {
             role_ptr->execute(this);
             return;
@@ -565,9 +533,7 @@ void SamplePlayer::actionImpl()
         // Конец матча
         bool done = (wm.time().cycle() >= M_match_end_cycle - 2);
 
-        // -------------------------------------------------------------------
         // Проверяем завершение текущего макро-действия
-        // -------------------------------------------------------------------
         bool macro_done = !M_macro_active
             || isMacroActionDone(wm)
             || (M_macro_action_timer >= getMaxTau(M_current_macro_action));
@@ -607,7 +573,6 @@ void SamplePlayer::actionImpl()
                     || M_current_macro_action == 2
                     || M_current_macro_action == 4)) {
                 // Без владения мячом ударные макро-действия вырождаются в tau=1,
-                // поэтому принудительно уходим в перехват.
                 M_current_macro_action = 6;
             }
             M_last_action          = M_current_macro_action;
@@ -627,8 +592,6 @@ void SamplePlayer::actionImpl()
         executeMacroAction(M_current_macro_action);
 
         // Обрабатываем конец матча
-        // Обрабатываем конец матча
-        // Обрабатываем конец матча
         if (done) {
             finalizeEpisode(true);
             return;
@@ -638,9 +601,7 @@ void SamplePlayer::actionImpl()
     }
 
 
-    // =======================================================================
     // Прочие режимы (penalty kick, set play)
-    // =======================================================================
     if (world().gameMode().isPenaltyKickMode()) {
         dlog.addText(Logger::TEAM, __FILE__": penalty kick");
         Bhv_PenaltyKick().execute(this);
@@ -649,8 +610,6 @@ void SamplePlayer::actionImpl()
 
     Bhv_SetPlay().execute(this);
 }
-
-// ---------------------------------------------------------------------------
 
 void SamplePlayer::handleActionStart()  {}
 void SamplePlayer::handlePlayerType()   {}
@@ -678,8 +637,6 @@ void SamplePlayer::handleActionEnd()
                      world().self().pos().y + 15.0));
     }
 }
-
-// ---------------------------------------------------------------------------
 
 void SamplePlayer::handleInitMessage()
 {
@@ -713,8 +670,6 @@ void SamplePlayer::communicationImpl()
 {
     if (M_communication) M_communication->execute(this);
 }
-
-// ---------------------------------------------------------------------------
 
 bool SamplePlayer::doPreprocess()
 {
@@ -830,7 +785,6 @@ bool SamplePlayer::doHeardPassReceive()
     return true;
 }
 
-// ---------------------------------------------------------------------------
 
 FieldEvaluator::ConstPtr SamplePlayer::getFieldEvaluator() const
 {

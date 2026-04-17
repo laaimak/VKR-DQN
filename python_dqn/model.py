@@ -39,16 +39,10 @@ class DQNetwork(nn.Module):
         self.fc3 = nn.Linear(hidden_dim, output_dim)
 
         # Инициализация выходного слоя малыми весами
-        # Это предотвращает взрывной рост Q-значений в начале обучения
         nn.init.uniform_(self.fc3.weight, -0.003, 0.003)
         nn.init.constant_(self.fc3.bias, 0.0)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Прямое распространение.
-        x: вектор состояния s_t размерностью [batch, 18]
-        Возвращает: Q-значения для каждого макро-действия [batch, 8]
-        """
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         return self.fc3(x)

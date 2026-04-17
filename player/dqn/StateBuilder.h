@@ -19,11 +19,8 @@ public:
      */
     static std::vector<double> getState(const rcsc::WorldModel& wm);
 
-    /**
-     * Определяет тактическую цель агента для Reward Shaping.
-     * wm:           модель мира
-     * tactical_pos: тактическая позиция P_i данного агента
-     */
+    // Определяет тактическую цель агента для Reward Shaping.
+
     static rcsc::Vector2D getTargetPosition(
         const rcsc::WorldModel& wm,
         const rcsc::Vector2D& tactical_pos);
