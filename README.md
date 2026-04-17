@@ -80,6 +80,7 @@ R_t = r_{t} + γ·r_{t+1} + γ²·r_{t+2} + ... + γ^τ·r_{t+τ}
 | 8 | 5478 | 0.051 |
 | 9 | 6242 | 0.050 |
 
+Будут дополнены позже.. 
 ---
 
 ## Структура проекта
@@ -125,44 +126,10 @@ cd helios-base
 cd src/player && make -j4
 ```
 
-### Обучение агента на позиции N
+### Обучение агента
 
 ```bash
-# 1. В swap_roles.py указать позицию агента
-AGENT_B = "3"
-
-# 2. Запустить смену формации
-python3 scripts/swap_roles.py
-
-# 3. Запустить обучение (50 матчей)
 source .venv314/bin/activate
 bash scripts/train_loop.sh 50
 ```
 
-### Мониторинг
-
-```bash
-tail -f helios-base/src/logs/agent_2_steps.csv
-
-# Построение графиков
-python3 python_dqn/plot_logs.py
-```
-
----
-
-## Гиперпараметры
-
-```json
-{
-    "gamma": 0.99,
-    "epsilon_start": 1.0,
-    "epsilon_min": 0.05,
-    "epsilon_decay": 0.001,
-    "batch_size": 64,
-    "buffer_size": 50000,
-    "learning_rate": 0.001,
-    "target_update_freq": 1000
-}
-```
-
----
