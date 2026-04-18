@@ -1,0 +1,35 @@
+{
+    "learning": {
+        "gamma": 0.99,
+        "epsilon_start": 1.0,
+        "epsilon_min": 0.05,
+        "epsilon_decay": 0.00005,
+        "batch_size": 64,
+        "buffer_size": 100000,
+        "target_update_freq": 1000,
+        "learning_rate": 0.0001,
+        "max_tau": 20
+    },
+    "reward": {
+        "r_goal": 150.0,
+        "w1": 0.03,
+        "w2": 0.001,
+        "kickable_bonus": 2.0,
+        "own_half_penalty": 0.0
+    },
+    "macro_actions": {
+        "max_tau_by_action": [10, 12, 20, 12, 14, 28, 20, 30]
+    },
+    "network": {
+        "input_dim": 18,
+        "hidden_dim": 128,
+        "output_dim": 8
+    },
+    "training": {
+        "log_interval": 5,
+        "save_interval": 100,
+        "match_end_cycle": 6000,
+        "logs_path": "/Users/laaimak/Desktop/VKR/helios-base/src/logs/",
+        "elite_weights_path": ""
+    }
+}
