@@ -289,7 +289,7 @@ class SMDPAgent:
     def load_weights(self, path: str):
         """Загружает веса, состояние оптимизатора, шаги и Эпсилон."""
         if os.path.exists(path):
-            checkpoint = torch.load(path, map_location=self.device)
+            checkpoint = torch.load(path, map_location=self.device, weights_only=False)
             self.policy_net.load_state_dict(checkpoint['policy_net'])
             self.target_net.load_state_dict(checkpoint['target_net'])
             

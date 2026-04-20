@@ -22,15 +22,19 @@ class DQNetwork(nn.Module):
     Выходной слой: 8 нейронов — по одному на каждое макро-действие из O.
     """
 
-    def __init__(self, config_path: str = None):
+    def __init__(self, input_dim: int = None, output_dim: int = None,
+                 config_path: str = None):
         super(DQNetwork, self).__init__()
 
-        cfg = load_config(config_path)
-        net_cfg = cfg["network"]
+        # Если переданы явные размерности — используем их (режим VDN)
+        # Иначе читаем из config (режим IQL)
+        if input_dim is None or output_dim is None:
+            cfg = load_config(config_path)
+            net_cfg = cfg["network"]
+            input_dim  = net_cfg["input_dim"]
+            output_dim = net_cfg["output_dim"]
 
-        input_dim  = net_cfg["input_dim"]   # 18
-        hidden_dim = net_cfg["hidden_dim"]  # 128
-        output_dim = net_cfg["output_dim"]  # 8
+        hidden_dim = 128
 
         # Информационный уровень: 18 признаков состояния
         self.fc1 = nn.Linear(input_dim, hidden_dim)
@@ -39,10 +43,20 @@ class DQNetwork(nn.Module):
         self.fc3 = nn.Linear(hidden_dim, output_dim)
 
         # Инициализация выходного слоя малыми весами
+        # Это предотвращает взрывной рост Q-значений в начале обучения
         nn.init.uniform_(self.fc3.weight, -0.003, 0.003)
         nn.init.constant_(self.fc3.bias, 0.0)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Прямое распространение.
+        x: вектор состояния s_t размерностью [batch, 18]
+        Возвращает: Q-значения для каждого макро-действия [batch, 8]
+        """
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         return self.fc3(x)
+
+
+# Алиас для совместимости с vdn_trainer
+DQN = DQNetwork

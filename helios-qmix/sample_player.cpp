@@ -2,7 +2,7 @@
 
 /*
  * Copyright: Hidehisa AKIYAMA
- * Modified for DQN integration: pybind11 bridge replaces TCP client
+ * Modified for VDN integration: CTDE via Flask server (train) / pybind11 (inference)
  */
 
 #ifdef HAVE_CONFIG_H
@@ -32,6 +32,7 @@
 #include "basic_actions/body_go_to_point.h"
 #include "basic_actions/body_intercept.h"
 #include "basic_actions/body_kick_one_step.h"
+#include "basic_actions/body_pass.h"
 #include "basic_actions/body_advance_ball2009.h"
 #include "basic_actions/body_clear_ball2009.h"
 #include "basic_actions/body_hold_ball2008.h"
@@ -53,8 +54,8 @@
 #include <rcsc/param/param_map.h>
 #include <rcsc/param/cmd_line_parser.h>
 
-// DQN модули
-#include "dqn/dqn_bridge.h"
+// VDN модули
+#include "dqn/vdn_bridge.h"
 #include "dqn/StateBuilder.h"
 #include "dqn/RewardEvaluator.h"
 
@@ -69,13 +70,20 @@
 using namespace rcsc;
 
 // ---------------------------------------------------------------------------
-// Пути к конфигурации и Python модулям
-// Задаются относительно рабочей директории запуска агента
+// Пути к VDN конфигурации и Python модулям
 // ---------------------------------------------------------------------------
-static const std::string DQN_CONFIG_PATH = "/Users/laaimak/Desktop/VKR/python_dqn/config_defender.json";
-static const std::string DQN_MODULE_DIR  = "/Users/laaimak/Desktop/VKR/python_dqn";
+static const std::string VDN_CONFIG_PATH = "/Users/laaimak/Desktop/VKR/python_vdn/config_vdn.json";
+static const std::string VDN_MODULE_DIR  = "/Users/laaimak/Desktop/VKR/python_vdn";
+static const std::string VDN_LOGS_PATH   = "/Users/laaimak/Desktop/VKR/helios-qmix/src/logs";
 
-// Вратарь (unum=1) управляется FSM helios, не DQN
+// Параметры вознаграждения (синхронизированы с config_vdn.json)
+static const double REWARD_GAMMA          = 0.99;
+static const double REWARD_W1             = 0.04;
+static const double REWARD_W2             = 0.001;
+static const double REWARD_GOAL           = 500.0;
+static const double REWARD_KICKABLE_BONUS = 2.0;
+static const double REWARD_OWN_HALF_PEN   = 0.0;
+
 static const int GOALIE_UNUM = 1;
 
 // ---------------------------------------------------------------------------
@@ -83,16 +91,18 @@ static const int GOALIE_UNUM = 1;
 SamplePlayer::SamplePlayer()
     : PlayerAgent()
     , M_communication()
-    , M_dqn_bridge(nullptr)
+    , M_vdn_bridge(nullptr)
     , M_reward_evaluator(nullptr)
     , M_current_macro_action(0)
     , M_macro_action_timer(0)
     , M_last_state()
     , M_last_action(0)
     , M_macro_active(false)
+    , M_first_action(true)
     , M_goal_event_consumed(false)
+    , M_episode_reward(0.0)
 {
-    M_field_evaluator = createFieldEvaluator();
+    M_field_evaluator  = createFieldEvaluator();
     M_action_generator = createActionGenerator();
 
     std::shared_ptr<AudioMemory> audio_memory(new AudioMemory);
@@ -128,7 +138,12 @@ SamplePlayer::SamplePlayer()
 SamplePlayer::~SamplePlayer()
 {
     finalizeEpisode(false);
-    // DQN Bridge освобождается через unique_ptr автоматически
+    // Если Python был запущен но bridge не создан (ошибка весов и т.п.) —
+    // finalizeEpisode вернулась без _Exit, а pybind11 упадёт при teardown.
+    if (VDNBridge::isPythonStarted()) {
+        std::fflush(nullptr);
+        std::_Exit(0);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -159,8 +174,7 @@ bool SamplePlayer::initImpl(CmdLineParser& cmd_parser)
         return false;
     }
 
-    if (KickTable::instance().read(
-            config().configDir() + "/kick-table")) {
+    if (KickTable::instance().read(config().configDir() + "/kick-table")) {
         std::cerr << "Loaded kick table." << std::endl;
     }
 
@@ -168,56 +182,54 @@ bool SamplePlayer::initImpl(CmdLineParser& cmd_parser)
 }
 
 // ---------------------------------------------------------------------------
-// Ленивая инициализация DQN Bridge
-// Вызывается при первом такте PlayOn чтобы знать unum агента
+// Ленивая инициализация VDN Bridge
 // ---------------------------------------------------------------------------
-void SamplePlayer::initDQNIfNeeded()
+void SamplePlayer::initVDNIfNeeded()
 {
-    if (M_dqn_bridge) return;
-    if (M_dqn_init_failed) return; 
+    if (M_vdn_bridge) return;
+    if (M_vdn_init_failed) return;
 
-    if (world().ourTeamName() != "DQN_Team") return;
-
+    // Вратарь управляется FSM helios, не VDN
     if (world().self().unum() == GOALIE_UNUM) return;
     if (world().self().goalie()) return;
 
-    int unum = world().self().unum();
+    int unum     = world().self().unum();
     int agent_id = unum;
 
+    // Переопределение через переменную окружения (для тестов)
     if (const char* forced_id = std::getenv("AGENT_FORCE_ID")) {
         const int parsed = std::atoi(forced_id);
-        if (parsed > 0) {
-            agent_id = parsed;
-        }
+        if (parsed > 0) agent_id = parsed;
     }
 
     try {
-        M_dqn_bridge = std::make_unique<DQNBridge>(
-            agent_id, DQN_CONFIG_PATH, DQN_MODULE_DIR
+        M_vdn_bridge = std::make_unique<VDNBridge>(
+            agent_id, VDN_CONFIG_PATH, VDN_MODULE_DIR
         );
 
-        M_max_tau_by_action = M_dqn_bridge->maxTauByAction();
-        M_match_end_cycle = M_dqn_bridge->matchEndCycle();
         M_reward_evaluator = std::make_unique<RewardEvaluator>(
-            M_dqn_bridge->rewardGamma(),
-            M_dqn_bridge->rewardW1(),
-            M_dqn_bridge->rewardW2(),
-            M_dqn_bridge->rewardGoal(),
-            M_dqn_bridge->rewardKickableBonus(),
-            M_dqn_bridge->rewardOwnHalfPenalty(),
-            M_dqn_bridge->agentId()
+            REWARD_GAMMA,
+            REWARD_W1,
+            REWARD_W2,
+            REWARD_GOAL,
+            REWARD_KICKABLE_BONUS,
+            REWARD_OWN_HALF_PEN,
+            agent_id
         );
-        M_dqn_bridge->resetEpisode();
+
+        M_episode_reward  = 0.0;
+        M_first_action    = true;
         M_episode_finalized = false;
-        
-        // M_dqn_bridge->loadEliteWeights(); // Отключено: используем индивидуальные веса
-        std::cerr << "[SamplePlayer] DQN initialized: unum=" << unum
-              << " agent_id=" << agent_id << std::endl;
+
+        std::cerr << "[SamplePlayer] VDN initialized: unum=" << unum
+                  << " agent_id=" << agent_id
+                  << " mode=" << (M_vdn_bridge->isInference() ? "INFERENCE" : "TRAIN")
+                  << std::endl;
     }
     catch (const std::exception& e) {
-        std::cerr << "[SamplePlayer] DQN init failed: " << e.what() << std::endl;
-        M_dqn_bridge.reset();
-        M_dqn_init_failed = true;  // больше не пробуем
+        std::cerr << "[SamplePlayer] VDN init failed: " << e.what() << std::endl;
+        M_vdn_bridge.reset();
+        M_vdn_init_failed = true;
     }
 }
 
@@ -227,53 +239,37 @@ void SamplePlayer::initDQNIfNeeded()
 bool SamplePlayer::isMacroActionDone(const WorldModel& wm) const
 {
     switch (M_current_macro_action) {
-    case 1: // shoot — завершается когда мяч покидает зону владения
+    case 1: // shoot
         return !wm.self().isKickable();
-
-    case 2: // pass — завершается когда мяч покидает зону владения
+    case 2: // pass
         return !wm.self().isKickable();
-
-    case 3: // dribble — завершается когда агент переместился на >2м
-            //           или потерял мяч
-        if (!wm.self().isKickable()
-            && wm.ball().distFromSelf() > 3.0) {
+    case 3: // dribble
+        if (!wm.self().isKickable() && wm.ball().distFromSelf() > 3.0)
             return true;
-        }
         return false;
-
-    case 4: // clear — завершается когда мяч покидает зону владения
+    case 4: // clear
         return !wm.self().isKickable();
-
-    case 5: // hold — завершается по таймеру (задаётся max_tau)
+    case 5: // hold
         return false;
-
-    case 6: // intercept — завершается когда агент стал владеть мячом
+    case 6: // intercept
         return wm.self().isKickable();
-
-    case 7: // block — завершается когда агент встал между противником
-            //         и воротами (упрощённо: dist до мяча < 2м)
+    case 7: // block
         return wm.self().pos().dist(wm.ball().pos()) < 2.0;
-
-    case 8: // positioning — завершается когда агент достиг позиции P_i
+    case 8: // positioning
         {
-            Vector2D tactical_pos =
-                Strategy::i().getPosition(wm.self().unum());
+            Vector2D tactical_pos = Strategy::i().getPosition(wm.self().unum());
             return wm.self().pos().dist(tactical_pos) < 1.0;
         }
-
     default:
         return false;
     }
 }
 
 // ---------------------------------------------------------------------------
-// Максимальная длительность каждого макро-действия (в тактах)
-// ---------------------------------------------------------------------------
 int SamplePlayer::getMaxTau(int action) const
 {
-    if (action >= 1 && action <= 8) {
+    if (action >= 1 && action <= 8)
         return M_max_tau_by_action[static_cast<std::size_t>(action - 1)];
-    }
     return 20;
 }
 
@@ -287,32 +283,60 @@ bool SamplePlayer::executeMacroAction(int action)
 
     switch (action) {
     case 1: // shoot
-        if ( wm.self().isKickable() ) {
+        if (wm.self().isKickable()) {
             executed = Bhv_StrictCheckShoot().execute(this);
+            if (!executed && wm.self().pos().dist(ServerParam::i().theirTeamGoalPos()) < 25.0) {
+                executed = Body_KickOneStep(
+                    ServerParam::i().theirTeamGoalPos(),
+                    ServerParam::i().ballSpeedMax()
+                ).execute(this);
+            }
         } else {
             executed = Body_Intercept().execute(this);
         }
         break;
 
     case 2: // pass
-        if ( wm.self().isKickable() ) {
-            executed = Body_KickOneStep(ServerParam::i().theirTeamGoalPos(),
-                                        ServerParam::i().ballSpeedMax()).execute(this);
+        if (wm.self().isKickable()) {
+            rcsc::Vector2D pass_point;
+            double pass_speed = 0.0;
+            int receiver = 0;
+            // Body_Pass сам выбирает лучшего получателя и тип паса
+            if (Body_Pass::get_best_pass(wm, &pass_point, &pass_speed, &receiver)) {
+                // Сообщаем получателю через say/hear
+                if (effector().getSayMessageLength() == 0) {
+                    if (effector().getSayMessageLength() == 0) {
+                    addSayMessage(new PassMessage(
+                        receiver,
+                        pass_point,
+                        effector().queuedNextBallPos(),
+                        effector().queuedNextBallVel()
+                    ));
+                }
+                }
+                executed = Body_Pass().execute(this);
+            } else {
+                // Нет хорошего паса — держим мяч
+                executed = Body_HoldBall2008().execute(this);
+            }
         } else {
             executed = Body_Intercept().execute(this);
         }
         break;
 
-    case 3: // dribble
-        if ( wm.self().isKickable() ) {
-            executed = Body_AdvanceBall2009().execute(this);
+    case 3: // dribble — ведём мяч в сторону ворот
+        if (wm.self().isKickable()) {
+            rcsc::Vector2D goal_dir =
+                (ServerParam::i().theirTeamGoalPos() - wm.self().pos()).normalizedVector();
+            rcsc::Vector2D dribble_target = wm.self().pos() + goal_dir * 5.0;
+            executed = Body_KickOneStep(dribble_target, 1.2).execute(this);
         } else {
             executed = Body_Intercept().execute(this);
         }
         break;
 
     case 4: // clear
-        if ( wm.self().isKickable() ) {
+        if (wm.self().isKickable()) {
             executed = Body_ClearBall2009().execute(this);
         } else {
             executed = Body_Intercept().execute(this);
@@ -320,7 +344,7 @@ bool SamplePlayer::executeMacroAction(int action)
         break;
 
     case 5: // hold
-        if ( wm.self().isKickable() ) {
+        if (wm.self().isKickable()) {
             executed = Body_HoldBall2008().execute(this);
         } else {
             executed = Body_Intercept().execute(this);
@@ -332,14 +356,14 @@ bool SamplePlayer::executeMacroAction(int action)
         this->setNeckAction(new Neck_TurnToBall());
         break;
 
-    case 7: // block — движемся к мячу чтобы блокировать противника
+    case 7: // block
         executed = Body_GoToPoint(
             wm.ball().pos(), 0.5,
             ServerParam::i().maxDashPower()
         ).execute(this);
         break;
 
-    case 8: // positioning — движемся на тактическую позицию
+    case 8: // positioning
         executed = Body_GoToPoint(
             Strategy::i().getPosition(wm.self().unum()),
             0.5,
@@ -348,37 +372,31 @@ bool SamplePlayer::executeMacroAction(int action)
         break;
 
     default:
-        // Fallback: стандартное поведение helios FSM
         {
-            SoccerRole::Ptr role =
-                Strategy::i().createRole(wm.self().unum(), wm);
+            SoccerRole::Ptr role = Strategy::i().createRole(wm.self().unum(), wm);
             if (role) executed = role->execute(this);
         }
         break;
     }
 
-    // Если выбранное поведение не выставило body-команду, даем безопасный fallback.
     if (!executed) {
         executed = Body_Intercept().execute(this);
     }
 
-    this->setNeckAction( new Neck_TurnToBallOrScan( 0 ) );
-
+    this->setNeckAction(new Neck_TurnToBallOrScan(0));
     return executed;
 }
 
 // ---------------------------------------------------------------------------
-// Финализация эпизода и запись итогов матча
+// Финализация эпизода
 // ---------------------------------------------------------------------------
 void SamplePlayer::finalizeEpisode(bool terminate_process)
 {
-    if (!M_dqn_bridge || M_episode_finalized) {
-        return;
-    }
+    if (!M_vdn_bridge || M_episode_finalized) return;
 
     const WorldModel& wm = world();
 
-    std::cerr << "--- FINAL SAVING START ---" << std::endl;
+    std::cerr << "--- VDN FINAL SAVING START ---" << std::endl;
 
     int our_score = (wm.ourSide() == rcsc::LEFT)
         ? wm.gameMode().scoreLeft()
@@ -387,97 +405,81 @@ void SamplePlayer::finalizeEpisode(bool terminate_process)
         ? wm.gameMode().scoreRight()
         : wm.gameMode().scoreLeft();
 
-    const double r_goal = M_dqn_bridge->rewardGoal();
-    // Этап 2: командная награда — каждый агент получает бонус за голы команды
-    // и штраф за пропущенные голы независимо от роли.
-    const double goal_terminal = our_score * r_goal - opp_score * r_goal;
+    const double goal_terminal = our_score * REWARD_GOAL - opp_score * REWARD_GOAL;
 
-    // Последний переход: шейпинг + терминальная награда за голы → в replay buffer
+    // Последний переход: отправляем на сервер с done=true
     if (M_macro_active && M_reward_evaluator
         && !M_last_state.empty() && M_last_action > 0) {
-        int tau = 0;
-        const double shaping_reward = M_reward_evaluator->getFinalRewardAndReset(tau);
-        const double total_final_reward = shaping_reward + goal_terminal;
-        const std::vector<double> current_state = StateBuilder::getState(wm);
-        M_dqn_bridge->pushAndTrain(
-            M_last_state, M_last_action, total_final_reward, current_state, true, tau);
-        M_dqn_bridge->addEpisodeReward(total_final_reward);
-        std::cerr << "[FINAL] pushAndTrain: shaping=" << shaping_reward
+        int    tau          = 0;
+        double shaping      = M_reward_evaluator->getFinalRewardAndReset(tau);
+        double total_reward = shaping + goal_terminal;
+
+        const std::vector<double> final_state = StateBuilder::getState(wm);
+
+        // TRAIN: отправляем на Flask; INFERENCE: игнорирует reward, делает forward pass
+        M_vdn_bridge->step(final_state, total_reward, /*done=*/true);
+
+        M_episode_reward += total_reward;
+
+        std::cerr << "[VDN FINAL] shaping=" << shaping
                   << " goal=" << goal_terminal
-                  << " total=" << total_final_reward
+                  << " total=" << total_reward
                   << " tau=" << tau << std::endl;
     } else {
-        // Макро не активно — только логируем goal_terminal
-        M_dqn_bridge->addEpisodeReward(goal_terminal);
-        std::cerr << "[FINAL] goal_terminal=" << goal_terminal
+        M_episode_reward += goal_terminal;
+        std::cerr << "[VDN FINAL] goal_terminal=" << goal_terminal
                   << " our=" << our_score << " opp=" << opp_score << std::endl;
     }
 
-    const double episode_reward = M_dqn_bridge->getEpisodeReward();
-
-    const std::string episode_log_path =
-        M_dqn_bridge->logsPath()
-        + "/" + "agent_"
-        + std::to_string(M_dqn_bridge->agentId())
+    // Логируем эпизод в CSV
+    const std::string log_path = VDN_LOGS_PATH
+        + "/vdn_agent_" + std::to_string(M_vdn_bridge->agentId())
         + "_episode_rewards.csv";
 
-    bool file_has_content = false;
+    bool has_content = false;
     {
-        std::ifstream check_file(episode_log_path.c_str());
-        file_has_content = check_file.good() && check_file.peek() != std::ifstream::traits_type::eof();
+        std::ifstream f(log_path.c_str());
+        has_content = f.good() && f.peek() != std::ifstream::traits_type::eof();
     }
 
     int match_id = 1;
-    if (file_has_content) {
-        std::ifstream in_file(episode_log_path.c_str());
+    if (has_content) {
+        std::ifstream f(log_path.c_str());
         std::string line;
-        int last_match_id = 0;
-        while (std::getline(in_file, line)) {
-            if (line.empty()) {
-                continue;
-            }
-            if (!std::isdigit(static_cast<unsigned char>(line[0]))) {
-                continue; // skip header or malformed lines
-            }
-            const std::size_t comma_pos = line.find(',');
-            if (comma_pos == std::string::npos) {
-                continue;
-            }
-            const int parsed_id = std::atoi(line.substr(0, comma_pos).c_str());
-            if (parsed_id > last_match_id) {
-                last_match_id = parsed_id;
-            }
+        int last_id = 0;
+        while (std::getline(f, line)) {
+            if (line.empty() || !std::isdigit((unsigned char)line[0])) continue;
+            std::size_t cp = line.find(',');
+            if (cp == std::string::npos) continue;
+            int id = std::atoi(line.substr(0, cp).c_str());
+            if (id > last_id) last_id = id;
         }
-        match_id = last_match_id + 1;
+        match_id = last_id + 1;
     }
 
     {
-        std::ofstream out_file(episode_log_path.c_str(), std::ios::app);
-        if (!file_has_content) {
-            out_file << "Match,EpisodeReward,ScoreFor,ScoreAgainst,StepsDone,Epsilon\n";
+        std::ofstream f(log_path.c_str(), std::ios::app);
+        if (!has_content) {
+            f << "Match,EpisodeReward,ScoreFor,ScoreAgainst,StepsDone,Epsilon\n";
         }
-        out_file << match_id << ','
-                 << std::fixed << std::setprecision(6) << episode_reward << ','
-                 << our_score << ','
-                 << opp_score << ','
-                 << M_dqn_bridge->stepsDone() << ','
-                 << std::fixed << std::setprecision(4) << M_dqn_bridge->epsilon() << '\n';
-        out_file.flush();
+        f << match_id << ','
+          << std::fixed << std::setprecision(6) << M_episode_reward << ','
+          << our_score << ','
+          << opp_score << ','
+          << M_vdn_bridge->stepsDone() << ','
+          << std::fixed << std::setprecision(4) << M_vdn_bridge->epsilon() << '\n';
+        f.flush();
     }
 
     std::cout << "Score: " << our_score << " - " << opp_score << std::endl;
     std::cout.flush();
 
-    M_dqn_bridge->saveRecordIfBest();
-
-    std::cerr << "--- DISCONNECTING ---" << std::endl;
-
     M_episode_finalized = true;
 
-    if (terminate_process) {
-        std::fflush(nullptr);
-        std::_Exit(0);
-    }
+    // _Exit всегда если Python был инициализирован:
+    // обходим деструкторный teardown pybind11 на macOS (recursive_mutex crash).
+    std::fflush(nullptr);
+    std::_Exit(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -510,12 +512,9 @@ void SamplePlayer::actionImpl()
 
     ActionChainHolder::instance().update(world());
 
-    // Создаём роль для стандартного поведения
     SoccerRole::Ptr role_ptr;
     {
-        role_ptr = Strategy::i().createRole(
-            world().self().unum(), world());
-
+        role_ptr = Strategy::i().createRole(world().self().unum(), world());
         if (!role_ptr) {
             std::cerr << config().teamName() << ": "
                       << world().self().unum()
@@ -525,8 +524,7 @@ void SamplePlayer::actionImpl()
         }
     }
 
-    // Режим set-play: используем стандартный helios
-    // AfterGoal_ исключаем — он обрабатывается ниже в goal-блоке DQN
+    // Set-play: стандартный helios (исключая AfterGoal)
     if (world().gameMode().type() != GameMode::PlayOn
         && world().gameMode().type() != GameMode::AfterGoal_
         && role_ptr->acceptExecution(world())) {
@@ -534,147 +532,158 @@ void SamplePlayer::actionImpl()
         return;
     }
 
-    // Вратарь: всегда стандартный helios FSM
+    // Вратарь: всегда helios FSM
     if (world().self().unum() == GOALIE_UNUM) {
         role_ptr->execute(this);
         return;
     }
 
     // =======================================================================
-    // DQN управление полевыми игроками в режиме PlayOn
+    // VDN управление полевыми игроками в режиме PlayOn
     // =======================================================================
     if (world().gameMode().type() == GameMode::PlayOn) {
 
-        // Ленивая инициализация DQN при первом такте
-        initDQNIfNeeded();
+        initVDNIfNeeded();
 
-        // Если DQN недоступен — fallback на helios FSM
-        if (!M_dqn_bridge) {
+        if (!M_vdn_bridge) {
             role_ptr->execute(this);
             return;
         }
 
         const WorldModel& wm = world();
 
-        // Тактическая позиция текущего агента из formations helios-base
-        Vector2D tactical_pos =
-            Strategy::i().getPosition(wm.self().unum());
+        Vector2D tactical_pos = Strategy::i().getPosition(wm.self().unum());
+        Vector2D target_pos   = StateBuilder::getTargetPosition(
+            wm, tactical_pos, M_vdn_bridge->agentId());
 
-        // Цель для вычисления потенциала вознаграждения.
-        // Передаём agent_id для зональной логики: защитник держит позицию
-        // когда мяч в чужой половине, форвард всегда идёт к мячу.
-        Vector2D target_pos =
-            StateBuilder::getTargetPosition(wm, tactical_pos, M_dqn_bridge->agentId());
-
-        // Конец матча
         bool done = (wm.time().cycle() >= M_match_end_cycle - 2);
 
         // -------------------------------------------------------------------
-        // Проверяем завершение текущего макро-действия
+        // Определяем нужно ли выбирать новое макро-действие
         // -------------------------------------------------------------------
-        bool macro_done = !M_macro_active
-            || isMacroActionDone(wm)
-            || (M_macro_action_timer >= getMaxTau(M_current_macro_action));
+        bool macro_expired = M_macro_active
+            && (isMacroActionDone(wm)
+                || M_macro_action_timer >= getMaxTau(M_current_macro_action));
 
-        bool transition_pushed_this_cycle = false;
+        bool select_new_action = !M_macro_active || M_first_action || macro_expired;
 
-        if (macro_done && M_macro_active && !done) {
-            // Получаем итоговую накопленную награду R_t и длительность tau
-            int    tau          = 0;
-            double final_reward = M_reward_evaluator->getFinalRewardAndReset(tau);
+        if (select_new_action) {
+            // Если предыдущее макро завершилось — отправляем переход на сервер
+            if (macro_expired && !M_first_action) {
+                int    tau          = 0;
+                double final_reward = M_reward_evaluator->getFinalRewardAndReset(tau);
+                M_episode_reward += final_reward;
 
-            // Текущий вектор состояния s_{t+tau}
-            std::vector<double> current_state = StateBuilder::getState(wm);
+                std::vector<double> next_state = StateBuilder::getState(wm);
 
-            // Сохраняем переход и выполняем шаг обучения
-            M_dqn_bridge->pushAndTrain(
-                M_last_state,
-                M_last_action,
-                final_reward,
-                current_state,
-                false,
-                tau
-            );
-            transition_pushed_this_cycle = true;
-            std::cerr << "[DEBUG] pushAndTrain called. tau=" << tau
-                    << " reward=" << final_reward << std::endl;
-        }
+                // TRAIN: отправляет (state, reward, done) на Flask → получает действие
+                // INFERENCE: reward игнорируется, делает локальный argmax
+                int new_action = M_vdn_bridge->step(next_state, final_reward, done);
 
-        if (macro_done || !M_macro_active) {
-            // Формируем новый вектор состояния s_t
-            M_last_state = StateBuilder::getState(wm);
+                std::cerr << "[VDN] step. tau=" << tau
+                          << " reward=" << final_reward
+                          << " -> action=" << new_action << std::endl;
 
-            // Выбираем новое макро-действие по ε-жадной стратегии
-            M_current_macro_action = M_dqn_bridge->act(M_last_state);
+                M_current_macro_action = new_action;
+                M_last_state           = next_state;
+                M_last_action          = new_action;
+            } else {
+                // Первое действие эпизода: POST /reset → первое действие
+                M_last_state = StateBuilder::getState(wm);
+                int first_act = M_vdn_bridge->reset(M_last_state);
 
-            // --- Ролевые ограничения действий (Action Masking) ---
-            // Предотвращают кучкование и задают тактическое поведение по роли.
-            // Описано в литературе как "action masking in RL" (Huang & Ontanon, 2020).
+                M_current_macro_action = first_act;
+                M_last_action          = first_act;
+                M_first_action         = false;
+                M_goal_event_consumed  = false;
+            }
+
+            M_macro_action_timer = 0;
+            M_macro_active       = true;
+
+            // --- Коммуникация: форвард слушает сигнал паса ---
             {
-                const int    aid      = M_dqn_bridge->agentId();
+                const int aid = M_vdn_bridge->agentId();
+                if (aid >= 10) {
+                    if (M_pass_receive_timer > 0) {
+                        M_current_macro_action = 6;
+                        M_pass_receive_timer--;
+                        std::cerr << "[COMM] Forward intercept timer="
+                                  << M_pass_receive_timer << std::endl;
+                    }
+                    if (wm.audioMemory().passTime() == wm.time()
+                        && !wm.audioMemory().pass().empty()) {
+                        for (const auto& p : wm.audioMemory().pass()) {
+                            if (p.receiver_ == wm.self().unum()) {
+                                M_pass_receive_timer   = 5;
+                                M_current_macro_action = 6;
+                                std::cerr << "[COMM] Forward received PASS signal" << std::endl;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // --- Ролевые ограничения (Action Masking) ---
+            {
+                const int    aid      = M_vdn_bridge->agentId();
                 const double ball_x   = wm.ball().pos().x;
                 const bool   has_ball = wm.self().isKickable();
 
                 // Защитник (2-5): мяч в чужой половине → только positioning/intercept/block
                 if (aid >= 2 && aid <= 5 && ball_x > 0.0) {
-                    if (M_current_macro_action == 0   // move_to_ball
-                     || M_current_macro_action == 1   // shoot
-                     || M_current_macro_action == 2   // pass
-                     || M_current_macro_action == 3   // dribble
-                     || M_current_macro_action == 5) {// hold
-                        M_current_macro_action = 8;   // → positioning
+                    if (M_current_macro_action == 0
+                     || M_current_macro_action == 1
+                     || M_current_macro_action == 2
+                     || M_current_macro_action == 3
+                     || M_current_macro_action == 5) {
+                        M_current_macro_action = 8;
                     }
                 }
 
-                // Полузащитник (6-9): мяч глубоко у нас (x < -25) → только positioning/intercept
+                // Полузащитник (6-9): мяч глубоко у нас → только positioning/intercept
                 if (aid >= 6 && aid <= 9 && ball_x < -25.0 && !has_ball) {
-                    if (M_current_macro_action == 0   // move_to_ball
-                     || M_current_macro_action == 1   // shoot
-                     || M_current_macro_action == 3   // dribble
-                     || M_current_macro_action == 5) {// hold
-                        M_current_macro_action = 8;   // → positioning
+                    if (M_current_macro_action == 0
+                     || M_current_macro_action == 1
+                     || M_current_macro_action == 3
+                     || M_current_macro_action == 5) {
+                        M_current_macro_action = 8;
                     }
                 }
             }
 
+            // Без мяча: ударные действия → intercept
             if (!wm.self().isKickable()
                 && (M_current_macro_action == 1
                     || M_current_macro_action == 2
                     || M_current_macro_action == 4)) {
-                // Без владения мячом ударные макро-действия вырождаются в tau=1,
-                // поэтому принудительно уходим в перехват.
                 M_current_macro_action = 6;
             }
-            M_last_action          = M_current_macro_action;
-            M_macro_action_timer   = 0;
-            M_macro_active         = true;
-            M_goal_event_consumed  = false;
 
-            // Инициализируем накопление награды для нового макро-действия
+            M_last_action = M_current_macro_action;
+
+            // Начинаем накопление награды для нового макро-действия
             M_reward_evaluator->startMacroAction(wm, target_pos);
         }
 
-        // Обновляем награду за текущий такт
+        // Обновляем шейпинговую награду за этот такт
         M_reward_evaluator->updateStep(wm, target_pos);
         M_macro_action_timer++;
 
-        // Выполняем выбранное макро-действие
+        // Выполняем макро-действие
         executeMacroAction(M_current_macro_action);
 
-        // Обрабатываем конец матча
-        // Обрабатываем конец матча
-        // Обрабатываем конец матча
         if (done) {
             finalizeEpisode(true);
             return;
         }
-        
+
         return;
     }
 
-
     // =======================================================================
-    // Прочие режимы (penalty kick, set play)
+    // Прочие режимы
     // =======================================================================
     if (world().gameMode().isPenaltyKickMode()) {
         dlog.addText(Logger::TEAM, __FILE__": penalty kick");
@@ -692,12 +701,20 @@ void SamplePlayer::handlePlayerType()   {}
 
 void SamplePlayer::handleActionEnd()
 {
+    // Полевые VDN-агенты завершают эпизод в конце матча
     if (!M_episode_finalized
-        && M_dqn_bridge
+        && M_vdn_bridge
         && world().self().unum() != GOALIE_UNUM
         && world().time().cycle() >= M_match_end_cycle - 2) {
         finalizeEpisode(true);
         return;
+    }
+
+    // Вратарь тоже выходит одновременно с полевыми — не играет в одиночку
+    if (world().self().goalie()
+        && world().time().cycle() >= M_match_end_cycle - 2) {
+        std::fflush(nullptr);
+        std::_Exit(0);
     }
 
     if (world().self().posValid()) {
@@ -791,9 +808,9 @@ bool SamplePlayer::doPreprocess()
 
     this->setViewAction(new View_Tactical());
 
-    if (doShoot())           return true;
-    if (this->doIntention()) return true;
-    if (doForceKick())       return true;
+    if (doShoot())            return true;
+    if (this->doIntention())  return true;
+    if (doForceKick())        return true;
     if (doHeardPassReceive()) return true;
 
     return false;
@@ -823,11 +840,9 @@ bool SamplePlayer::doForceKick()
         dlog.addText(Logger::TEAM, __FILE__": simultaneous kick");
         this->debugClient().addMessage("SimultaneousKick");
         Vector2D goal_pos(ServerParam::i().pitchHalfLength(), 0.0);
-        if (wm.self().pos().x > 36.0 && wm.self().pos().absY() > 10.0) {
+        if (wm.self().pos().x > 36.0 && wm.self().pos().absY() > 10.0)
             goal_pos.x = 45.0;
-        }
-        Body_KickOneStep(goal_pos,
-                         ServerParam::i().ballSpeedMax()).execute(this);
+        Body_KickOneStep(goal_pos, ServerParam::i().ballSpeedMax()).execute(this);
         this->setNeckAction(new Neck_ScanField());
         return true;
     }
@@ -843,8 +858,7 @@ bool SamplePlayer::doHeardPassReceive()
         return false;
     }
 
-    int self_min = wm.interceptTable().selfStep();
-    Vector2D intercept_pos = wm.ball().inertiaPoint(self_min);
+    int self_min       = wm.interceptTable().selfStep();
     Vector2D heard_pos = wm.audioMemory().pass().front().receive_pos_;
 
     if (!wm.kickableTeammate()

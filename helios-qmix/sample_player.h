@@ -2,7 +2,7 @@
 
 /*
  * Copyright: Hidehisa AKIYAMA
- * Modified for DQN integration
+ * Modified for VDN integration (CTDE via Flask server)
  */
 
 #ifndef SAMPLE_PLAYER_H
@@ -16,14 +16,11 @@
 #include <rcsc/geom/vector_2d.h>
 
 #include "dqn/RewardEvaluator.h"
-#include "dqn/dqn_bridge.h"
+#include "dqn/vdn_bridge.h"
 
 #include <vector>
 #include <memory>
 #include <array>
-
-// Forward declarations
-class DQNBridge;
 
 class SamplePlayer
     : public rcsc::PlayerAgent {
@@ -33,22 +30,28 @@ private:
     FieldEvaluator::ConstPtr  M_field_evaluator;
     ActionGenerator::ConstPtr M_action_generator;
 
-    // DQN модуль — интегрирован как разделяемая библиотека через pybind11
-    // Каждый экземпляр SamplePlayer имеет собственный DQNBridge — парадигма IQL
-    std::unique_ptr<DQNBridge>      M_dqn_bridge;
+    // VDN Bridge: TRAIN mode → HTTP к Flask; INFERENCE mode → локальная Q-сеть
+    std::unique_ptr<VDNBridge>       M_vdn_bridge;
     std::unique_ptr<RewardEvaluator> M_reward_evaluator;
 
     // Состояние макро-действия
-    int                  M_current_macro_action; // текущее макро-действие (1-8)
-    int                  M_macro_action_timer;   // счётчик тактов tau
-    std::vector<double>  M_last_state;           // s_t на момент выбора действия
-    int                  M_last_action;          // выбранное действие o_t
-    bool                 M_macro_active;         // флаг активного макро-действия
+    int                  M_current_macro_action;
+    int                  M_macro_action_timer;
+    std::vector<double>  M_last_state;
+    int                  M_last_action;
+    bool                 M_macro_active;
+    bool                 M_first_action;      // ещё не выбрали первое действие
     std::array<int, 8>   M_max_tau_by_action{{10, 10, 20, 10, 15, 30, 20, 40}};
-    int                  M_match_end_cycle = 1200;
+    int                  M_match_end_cycle = 6000;
     bool                 M_episode_finalized = false;
     bool                 M_goal_event_consumed = false;
-    bool M_dqn_init_failed = false;
+    bool                 M_vdn_init_failed = false;
+
+    // Накопленная награда за эпизод (для логирования)
+    double               M_episode_reward = 0.0;
+
+    // Коммуникационный протокол pass/hear
+    int  M_pass_receive_timer = 0;
 
 public:
 
@@ -74,17 +77,10 @@ protected:
 
 private:
 
-    // Ленивая инициализация DQN (вызывается при первом такте PlayOn)
-    void initDQNIfNeeded();
+    void initVDNIfNeeded();
 
-    // Условие досрочного завершения макро-действия
     bool isMacroActionDone(const rcsc::WorldModel& wm) const;
-
-    // Максимальная длительность макро-действия (в тактах)
-    int getMaxTau(int action) const;
-
-    // Выполнение выбранного макро-действия
-    // Возвращает true, если удалось выставить body-команду
+    int  getMaxTau(int action) const;
     bool executeMacroAction(int action);
 
     void finalizeEpisode(bool terminate_process);

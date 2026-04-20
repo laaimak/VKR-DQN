@@ -72,18 +72,19 @@ void RewardEvaluator::updateStep(const rcsc::WorldModel& wm, const rcsc::Vector2
     }
     // РОЛЬ: ПОЛУЗАЩИТНИК
     else {
-        shaping_reward = 0.7 * M_w1 * delta_dist - 0.8 * M_w2 * delta_stamina;
+        shaping_reward = M_w1 * delta_dist - M_w2 * delta_stamina;
         if (wm.self().isKickable()) {
-            shaping_reward += 0.5 * M_kickable_bonus;
+            shaping_reward += M_kickable_bonus;
         }
     }
 
-    // Штраф за скученность: если союзник ближе 3м — оба мешают друг другу.
-    // Не применяем к форварду — ему можно давить у чужих ворот.
+    // Штраф за скученность: если союзник ближе 3м.
+    // Для полузащитника уменьшен — они по природе ближе к центру поля.
     if (!is_forward) {
+        const double crowd_penalty = is_defender ? 0.3 : 0.05;
         for (const rcsc::PlayerObject* tm : wm.teammates()) {
             if (tm && tm->unum() != 1 && tm->distFromSelf() < 3.0) {
-                shaping_reward -= 0.3;
+                shaping_reward -= crowd_penalty;
             }
         }
     }
