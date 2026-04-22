@@ -15,19 +15,12 @@ def load_config(config_path: str = None) -> dict:
 class DQNetwork(nn.Module):
     """
     Аппроксиматор функции ценности Q_i(s^i, o^i; theta_i).
-
-    Архитектура: многослойный перцептрон (MLP).
-    Входной слой: вектор состояния s_t размерностью 18.
-    Скрытые слои: два слоя с функцией активации ReLU: f(x) = max(0, x).
-    Выходной слой: 8 нейронов — по одному на каждое макро-действие из O.
     """
 
     def __init__(self, input_dim: int = None, output_dim: int = None,
                  config_path: str = None):
         super(DQNetwork, self).__init__()
 
-        # Если переданы явные размерности — используем их (режим VDN)
-        # Иначе читаем из config (режим IQL)
         if input_dim is None or output_dim is None:
             cfg = load_config(config_path)
             net_cfg = cfg["network"]
@@ -43,7 +36,6 @@ class DQNetwork(nn.Module):
         self.fc3 = nn.Linear(hidden_dim, output_dim)
 
         # Инициализация выходного слоя малыми весами
-        # Это предотвращает взрывной рост Q-значений в начале обучения
         nn.init.uniform_(self.fc3.weight, -0.003, 0.003)
         nn.init.constant_(self.fc3.bias, 0.0)
 
@@ -57,6 +49,4 @@ class DQNetwork(nn.Module):
         x = F.relu(self.fc2(x))
         return self.fc3(x)
 
-
-# Алиас для совместимости с vdn_trainer
 DQN = DQNetwork

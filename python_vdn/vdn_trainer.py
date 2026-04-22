@@ -1,20 +1,4 @@
-"""
-VDN Trainer — центральный тренер для всех агентов.
-
-Архитектура:
-  - N индивидуальных DQN-агентов (задаётся через конфиг)
-  - 1 VDNMixer — суммирует Q-значения → Q_total
-  - Shared replay buffer — хранит совместные переходы всей команды
-
-Протокол обучения (один шаг):
-  1. Каждый агент выбирает действие по своей Q-сети (ε-greedy)
-  2. Все агенты выполняют действия в симуляторе
-  3. Тренер собирает (s_i, a_i, r_team, s'_i) от всех агентов
-  4. Пишет совместный переход в shared buffer
-  5. Сэмплирует батч → считает Q_total через VDNMixer
-  6. Loss = (Q_total - (r_team + γ * max Q_total_next))²
-  7. Обновляет все N сетей + mixer одним backward pass
-"""
+# VDN Trainer — центральный тренер для всех агентов.
 
 import torch
 import torch.nn as nn
@@ -29,18 +13,7 @@ from mixer import VDNMixer
 
 
 class VDNSharedBuffer:
-    """
-    Совместный replay buffer для всей команды.
-
-    Каждый переход содержит состояния и действия ВСЕХ агентов:
-        (states, actions, team_reward, next_states, done)
-
-    states:      [n_agents, state_dim]
-    actions:     [n_agents]
-    team_reward: float (общая командная награда)
-    next_states: [n_agents, state_dim]
-    done:        bool
-    """
+    # Совместный replay buffer для всей команды.
 
     def __init__(self, capacity: int, n_agents: int, state_dim: int):
         self.capacity   = capacity
@@ -80,12 +53,7 @@ class VDNSharedBuffer:
 
 
 class VDNTrainer:
-    """
-    Центральный VDN тренер.
-
-    AGENT_IDS и роли читаются из конфига (секция "agents").
-    Если fresh_start=true — обучение с нуля, без загрузки IQL весов.
-    """
+    # Центральный VDN тренер.
 
     STATE_DIM = 18
     N_ACTIONS = 8
@@ -124,7 +92,6 @@ class VDNTrainer:
         self.fresh_start: bool = agents_cfg.get("fresh_start", False)
         self.N_AGENTS = len(self.AGENT_IDS)
 
-        # Откуда грузить веса (по умолчанию — та же папка что и logs_path)
         self.weights_load_path: str = cfg.get("weights_load_path", logs_path)
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -161,12 +128,10 @@ class VDNTrainer:
         if self.fresh_start:
             print(f"[VDN] fresh_start=true — обучение с нуля (случайная инициализация)")
         else:
-            # Пробуем загрузить VDN checkpoint (продолжение) или IQL веса (инициализация)
             if not self._try_load_vdn_checkpoint():
                 self._load_pretrained_weights()
 
     def _try_load_vdn_checkpoint(self) -> bool:
-        """Пробует загрузить VDN checkpoint из weights_load_path. Возвращает True если удалось."""
         all_found = all(
             os.path.exists(os.path.join(self.weights_load_path, f"vdn_agent_{aid}.pth"))
             for aid in self.AGENT_IDS
@@ -177,7 +142,6 @@ class VDNTrainer:
         return False
 
     def _load_pretrained_weights(self):
-        """Загружает IQL веса как начальную инициализацию (не fresh_start)."""
         for aid in self.AGENT_IDS:
             role = self.AGENT_ROLES.get(aid, "defender")
             ckpt   = os.path.join(self.logs_path, f"agent_{aid}_checkpoint.pth")
@@ -203,7 +167,7 @@ class VDNTrainer:
         print(f"[VDN] Старт с IQL весов (VDN обучение с нуля)")
 
     def select_action(self, agent_id: int, state: List[float]) -> int:
-        """ε-greedy выбор действия для агента."""
+        # ε-greedy выбор действия для агента.
         if np.random.random() < self.epsilon:
             return np.random.randint(self.N_ACTIONS)
         state_t = torch.FloatTensor(state).unsqueeze(0).to(self.device)
@@ -239,8 +203,8 @@ class VDNTrainer:
             q_vals = self.policy_nets[aid](states[:, i, :])
             q_a    = q_vals.gather(1, actions[:, i].unsqueeze(1))
             agent_qs.append(q_a)
-        agent_qs = torch.cat(agent_qs, dim=1)   # [batch, n_agents]
-        q_total  = self.mixer(agent_qs)          # [batch, 1]
+        agent_qs = torch.cat(agent_qs, dim=1)
+        q_total  = self.mixer(agent_qs)
 
         # Target Q-total
         with torch.no_grad():
@@ -275,7 +239,6 @@ class VDNTrainer:
                        * np.exp(-self.epsilon_decay * self.steps_done)
 
     def save(self):
-        """Сохраняет все сети + mixer."""
         for aid in self.AGENT_IDS:
             path = os.path.join(self.logs_path, f"vdn_agent_{aid}.pth")
             torch.save({

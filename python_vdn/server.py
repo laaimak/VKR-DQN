@@ -1,9 +1,6 @@
 """
 VDN Central Server — Flask HTTP сервер.
 
-Агенты подключаются к одному серверу. Конфиг читается из CONFIG_PATH.
-Если в конфиге agents.fresh_start=true — обучение с нуля.
-
 Эндпоинты:
     POST /step   — агент сообщает своё состояние и получает действие
     POST /reset  — агент сигнализирует начало нового эпизода
@@ -21,9 +18,7 @@ from flask import Flask, request, jsonify
 
 from vdn_trainer import VDNTrainer
 
-# ─── Конфигурация ────────────────────────────────────────────────────────────
-# Можно передать путь к конфигу через аргумент командной строки:
-#   python3 server.py config_vdn_4v4.json
+# Конфигурация
 _cfg_arg    = sys.argv[1] if len(sys.argv) > 1 else "config_vdn.json"
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), _cfg_arg)
 
@@ -34,22 +29,25 @@ LOGS_PATH = _cfg.get("logs_path",
             "/Users/laaimak/Desktop/VKR/helios-qmix/src/logs")
 PORT      = _cfg.get("server", {}).get("port", 6100)
 
-# AGENT_IDS берём из конфига (секция agents.ids) или дефолт 10 агентов
+# AGENT_IDS берём из конфига или дефолт 10 агентов
 AGENT_IDS   = _cfg.get("agents", {}).get("ids", [2,3,4,5,6,7,8,9,10,11])
 N_AGENTS    = len(AGENT_IDS)
 TRAIN_EVERY = N_AGENTS
 
+# PLAY_MODE: без обучения, epsilon=0, только инференс
+PLAY_MODE = int(os.environ.get("VDN_PLAY", "0")) == 1
+
 app = Flask(__name__)
 logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
-# ─── Глобальное состояние ────────────────────────────────────────────────────
+# Глобальное состояние
 trainer: VDNTrainer = None
 lock = threading.Lock()
 
 # Последнее известное состояние и действие каждого агента
-agent_states:  dict = {}   # agent_id → state
-agent_actions: dict = {}   # agent_id → action
-transitions_pending = [0]  # счётчик накопленных переходов
+agent_states:  dict = {}
+agent_actions: dict = {}
+transitions_pending = [0]
 step_count          = [0]
 match_count         = [0]
 
@@ -113,10 +111,6 @@ def step():
       state  — новое состояние s'
       reward — накопленная награда за макро-действие
       done   — конец эпизода
-
-    Сервер записывает переход в shared buffer.
-    Когда накопилось TRAIN_EVERY переходов — делает train_step.
-    Немедленно возвращает новое действие (без ожидания других агентов).
     """
     data     = request.json
     agent_id = int(data["agent_id"])
@@ -128,14 +122,14 @@ def step():
         prev_state  = agent_states.get(agent_id)
         prev_action = agent_actions.get(agent_id)
 
-    # Если есть предыдущий шаг — записываем переход
-    if prev_state is not None and prev_action is not None:
+    # Если есть предыдущий шаг — записываем переход (только в режиме обучения)
+    if not PLAY_MODE and prev_state is not None and prev_action is not None:
         # Собираем состояния всех агентов для совместного перехода
         with lock:
             all_states      = {aid: agent_states.get(aid,  [0.0]*18) for aid in AGENT_IDS}
             all_actions     = {aid: agent_actions.get(aid, 0)         for aid in AGENT_IDS}
             all_next_states = dict(all_states)
-            all_next_states[agent_id] = state  # только этот агент обновился
+            all_next_states[agent_id] = state
 
         team_reward = reward  # индивидуальная награда как часть командной
 
@@ -177,10 +171,7 @@ def step():
 
 @app.route("/match_result", methods=["POST"])
 def match_result():
-    """
-    Скрипт запуска сообщает результат матча после его завершения.
-    Тело: {"left_score": int, "right_score": int}
-    """
+    
     data = request.json or {}
     left  = int(data.get("left_score",  0))
     right = int(data.get("right_score", 0))
@@ -225,7 +216,6 @@ def status():
     })
 
 
-# ─── Запуск ───────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     os.makedirs(LOGS_PATH, exist_ok=True)
 
@@ -240,5 +230,9 @@ if __name__ == "__main__":
     print("=" * 50)
 
     trainer = VDNTrainer(CONFIG_PATH, LOGS_PATH)
+
+    if PLAY_MODE:
+        trainer.epsilon = 0.0
+        print("[VDN] PLAY MODE: epsilon=0, обучение отключено")
 
     app.run(host="0.0.0.0", port=PORT, threaded=True)

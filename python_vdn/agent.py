@@ -54,9 +54,6 @@ def resolve_role_config_path(agent_id: int, config_path: str | None) -> str:
 class SMDPAgent:
     """
     DQN агент для Semi-Markov Decision Process.
-
-    Каждый агент обучается независимо (Independent Q-Learning):
-    своя нейросеть, свой буфер воспроизведения, свои веса.
     """
     def __init__(self, agent_id: int, config_path: str = None):
         
@@ -84,15 +81,14 @@ class SMDPAgent:
         self.action_dim = net_cfg["output_dim"]
         self.gamma      = learn_cfg["gamma"]
 
-        # ε-жадная стратегия: ε(t) = ε_min + (ε_start - ε_min) * e^{-λt}
+        # ε-жадная стратегия
         self.epsilon       = learn_cfg["epsilon_start"]
         self.epsilon_start = learn_cfg["epsilon_start"]
         self.epsilon_min   = learn_cfg["epsilon_min"]
         self.epsilon_decay = learn_cfg["epsilon_decay"]
         self.steps_done    = 0
 
-        # Основная сеть обновляется каждый шаг,
-        # целевая — каждые target_update_freq шагов
+        # Основная сеть обновляется каждый шаг, целевая — каждые target_update_freq шагов
         self.policy_net = DQNetwork(self.config_path).to(self.device)
         self.target_net = DQNetwork(self.config_path).to(self.device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
@@ -134,28 +130,28 @@ class SMDPAgent:
             with open(self.episode_log_file, mode='w') as f:
                 f.write("Match,EpisodeReward,ScoreFor,ScoreAgainst,StepsDone,Epsilon\n")
         
-        # Личный чекпоинт конкретного номера (чтобы продолжить после паузы)
+        # Личный чекпоинт конкретного номера
         agent_checkpoint = os.path.join(
             self.logs_path, f"agent_{self.agent_id}_checkpoint.pth"
         )
         self.agent_checkpoint = agent_checkpoint
         
-        # "Мастер-веса" для всей роли (например, лучшие знания всех защитников)
+        # "Мастер-веса" для всей роли
         self.role_master_path = os.path.join(
             self.logs_path, f"master_{self.role}.pth"
         )
 
-        # 1. Свой чекпоинт (самый точный прогресс конкретного игрока)
+        # 1. Свой чекпоинт
         if os.path.exists(agent_checkpoint):
             self.load_weights(agent_checkpoint)
             print(f"[Agent {self.agent_id}] Загружен личный чекпоинт.")
             
-        # 2. Мастер-веса роли (если своего нет, берем опыт "старших братьев" по позиции)
+        # 2. Мастер-веса роли
         elif os.path.exists(self.role_master_path):
             self.load_weights(self.role_master_path)
             print(f"[Agent {self.agent_id}] Наследуем мастер-веса роли: {self.role}")
             
-        # 3. Общие элитные веса (если они прописаны в конфиге как база для всех)
+        # 3. Общие элитные веса
         elif self.elite_weights_path and os.path.exists(self.elite_weights_path):
             self.load_weights(self.elite_weights_path)
             print(f"[Agent {self.agent_id}] Используем общие элитные веса.")
@@ -190,7 +186,6 @@ class SMDPAgent:
     def act(self, state: list) -> int:
         """
         ε-жадный выбор макро-действия.
-        Возвращает action_id от 1 до 8.
         """
         if random.random() < self.epsilon:
             return random.randint(1, self.action_dim)
@@ -198,15 +193,10 @@ class SMDPAgent:
         state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
         with torch.no_grad():
             q_values = self.policy_net(state_tensor)
-        return int(torch.argmax(q_values).item()) + 1
+        return int(torch.argmax(q_values).item())
 
     def train(self) -> float | None:
-        """
-        Один шаг оптимизации по уравнению Беллмана для SMDP:
-
-            y_t = R_t + gamma^tau * max_a Q(s_{t+tau}, a; theta^-)
-            L   = MSE(Q(s_t, a_t; theta), y_t)
-        """
+        
         if len(self.memory) < self.batch_size:
             return None
 
@@ -229,7 +219,6 @@ class SMDPAgent:
             discount = torch.pow(self.gamma, taus)
             target_q = rewards + (discount * next_q * (1 - dones))
 
-        # Huber loss устойчивее MSE при редких больших TD-ошибках.
         loss = F.smooth_l1_loss(current_q, target_q.unsqueeze(1))
 
         self.optimizer.zero_grad()
@@ -302,12 +291,11 @@ class SMDPAgent:
             self.epsilon       = checkpoint.get('epsilon', self.epsilon_start)
             self.epsilon_start = checkpoint.get('epsilon_start', self.epsilon_start)
 
-            print(f"[Agent {self.agent_id}] 🧠 Загружен чекпоинт из {os.path.basename(path)}.")
-            print(f"[Agent {self.agent_id}] 🔄 Продолжаем! Шаги: {self.steps_done}, Эпсилон: {self.epsilon:.4f}")
+            print(f"[Agent {self.agent_id}] Загружен чекпоинт из {os.path.basename(path)}.")
+            print(f"[Agent {self.agent_id}] Продолжаем! Шаги: {self.steps_done}, Эпсилон: {self.epsilon:.4f}")
             
     def save_elite_if_best(self, all_rewards: dict):
         """Индивидуальное сохранение весов: бьем собственный исторический рекорд."""
-        # Берем награду из словаря (там только мы сами, так как C++ шлет только себя)
         match_reward = all_rewards.get(self.agent_id, -float('inf'))
         
         # Файлы для конкретного агента
@@ -350,7 +338,6 @@ class SMDPAgent:
         match_id = 1
         if file_has_content:
             with open(self.episode_log_file, mode='r') as f:
-                # -1 для заголовка
                 line_count = sum(1 for _ in f)
                 match_id = max(1, line_count)
 
@@ -363,8 +350,7 @@ class SMDPAgent:
             f.flush()
             os.fsync(f.fileno())
 
-        # Фиксируем прогресс после каждого матча,
-        # чтобы следующий матч не стартовал с более старого checkpoints.
+        # Фиксируем прогресс после каждого матча, чтобы следующий матч не стартовал с более старого checkpoints.
         self.save_weights(self.agent_checkpoint)
 
         # Сравниваем финальную награду матча с рекордом и обновляем мастер-веса.
@@ -393,7 +379,7 @@ class SMDPAgent:
             
             self.save_weights(personal_weights_path)
             self.save_weights(self.role_master_path)
-            print(f"[Agent {self.agent_id}] 🔥 СТРАХОВКА СРАБОТАЛА: Награда {self.episode_reward:.2f} побила рекорд! Мастер-веса обновлены.")
+            print(f"[Agent {self.agent_id}] СТРАХОВКА СРАБОТАЛА: Награда {self.episode_reward:.2f} побила рекорд! Мастер-веса обновлены.")
 
     
     def _log_step(self, loss: float, avg_reward: float):
