@@ -17,10 +17,6 @@ __pycache__/
 *.egg-info/
 .venv/
 
-*.pth
-
-*.csv
-
 rcssserver-master/
 rcssmonitor/
 helios-original/
