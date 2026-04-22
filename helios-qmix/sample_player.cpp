@@ -69,14 +69,12 @@
 
 using namespace rcsc;
 
-// ---------------------------------------------------------------------------
 // Пути к VDN конфигурации и Python модулям
-// ---------------------------------------------------------------------------
 static const std::string VDN_CONFIG_PATH = "/Users/laaimak/Desktop/VKR/python_vdn/config_vdn.json";
 static const std::string VDN_MODULE_DIR  = "/Users/laaimak/Desktop/VKR/python_vdn";
 static const std::string VDN_LOGS_PATH   = "/Users/laaimak/Desktop/VKR/helios-qmix/src/logs";
 
-// Параметры вознаграждения (синхронизированы с config_vdn.json)
+// Параметры вознаграждения
 static const double REWARD_GAMMA          = 0.99;
 static const double REWARD_W1             = 0.04;
 static const double REWARD_W2             = 0.001;
@@ -86,7 +84,6 @@ static const double REWARD_OWN_HALF_PEN   = 0.0;
 
 static const int GOALIE_UNUM = 1;
 
-// ---------------------------------------------------------------------------
 
 SamplePlayer::SamplePlayer()
     : PlayerAgent()
@@ -138,15 +135,13 @@ SamplePlayer::SamplePlayer()
 SamplePlayer::~SamplePlayer()
 {
     finalizeEpisode(false);
-    // Если Python был запущен но bridge не создан (ошибка весов и т.п.) —
-    // finalizeEpisode вернулась без _Exit, а pybind11 упадёт при teardown.
+
     if (VDNBridge::isPythonStarted()) {
         std::fflush(nullptr);
         std::_Exit(0);
     }
 }
 
-// ---------------------------------------------------------------------------
 
 bool SamplePlayer::initImpl(CmdLineParser& cmd_parser)
 {
@@ -181,22 +176,20 @@ bool SamplePlayer::initImpl(CmdLineParser& cmd_parser)
     return true;
 }
 
-// ---------------------------------------------------------------------------
 // Ленивая инициализация VDN Bridge
-// ---------------------------------------------------------------------------
 void SamplePlayer::initVDNIfNeeded()
 {
     if (M_vdn_bridge) return;
     if (M_vdn_init_failed) return;
 
-    // Вратарь управляется FSM helios, не VDN
+    // Вратарь управляется FSM helios
     if (world().self().unum() == GOALIE_UNUM) return;
     if (world().self().goalie()) return;
 
     int unum     = world().self().unum();
     int agent_id = unum;
 
-    // Переопределение через переменную окружения (для тестов)
+    // Переопределение через переменную окружения
     if (const char* forced_id = std::getenv("AGENT_FORCE_ID")) {
         const int parsed = std::atoi(forced_id);
         if (parsed > 0) agent_id = parsed;
@@ -233,9 +226,7 @@ void SamplePlayer::initVDNIfNeeded()
     }
 }
 
-// ---------------------------------------------------------------------------
 // Условия досрочного завершения макро-действия
-// ---------------------------------------------------------------------------
 bool SamplePlayer::isMacroActionDone(const WorldModel& wm) const
 {
     switch (M_current_macro_action) {
@@ -265,7 +256,6 @@ bool SamplePlayer::isMacroActionDone(const WorldModel& wm) const
     }
 }
 
-// ---------------------------------------------------------------------------
 int SamplePlayer::getMaxTau(int action) const
 {
     if (action >= 1 && action <= 8)
@@ -273,9 +263,7 @@ int SamplePlayer::getMaxTau(int action) const
     return 20;
 }
 
-// ---------------------------------------------------------------------------
 // Выполнение макро-действия
-// ---------------------------------------------------------------------------
 bool SamplePlayer::executeMacroAction(int action)
 {
     const WorldModel& wm = world();
@@ -301,7 +289,6 @@ bool SamplePlayer::executeMacroAction(int action)
             rcsc::Vector2D pass_point;
             double pass_speed = 0.0;
             int receiver = 0;
-            // Body_Pass сам выбирает лучшего получателя и тип паса
             if (Body_Pass::get_best_pass(wm, &pass_point, &pass_speed, &receiver)) {
                 // Сообщаем получателю через say/hear
                 if (effector().getSayMessageLength() == 0) {
@@ -387,10 +374,8 @@ bool SamplePlayer::executeMacroAction(int action)
     return executed;
 }
 
-// ---------------------------------------------------------------------------
 // Финализация эпизода
-// ---------------------------------------------------------------------------
-void SamplePlayer::finalizeEpisode(bool terminate_process)
+void SamplePlayer::finalizeEpisode(bool /*terminate_process*/)
 {
     if (!M_vdn_bridge || M_episode_finalized) return;
 
@@ -476,15 +461,11 @@ void SamplePlayer::finalizeEpisode(bool terminate_process)
 
     M_episode_finalized = true;
 
-    // _Exit всегда если Python был инициализирован:
-    // обходим деструкторный teardown pybind11 на macOS (recursive_mutex crash).
     std::fflush(nullptr);
     std::_Exit(0);
 }
 
-// ---------------------------------------------------------------------------
 // Главный цикл принятия решений
-// ---------------------------------------------------------------------------
 void SamplePlayer::actionImpl()
 {
     if (this->audioSensor().trainerMessageTime() == world().time()) {
@@ -524,7 +505,7 @@ void SamplePlayer::actionImpl()
         }
     }
 
-    // Set-play: стандартный helios (исключая AfterGoal)
+    // Set-play: стандартный helios
     if (world().gameMode().type() != GameMode::PlayOn
         && world().gameMode().type() != GameMode::AfterGoal_
         && role_ptr->acceptExecution(world())) {
@@ -532,15 +513,13 @@ void SamplePlayer::actionImpl()
         return;
     }
 
-    // Вратарь: всегда helios FSM
+    // Вратарь
     if (world().self().unum() == GOALIE_UNUM) {
         role_ptr->execute(this);
         return;
     }
 
-    // =======================================================================
     // VDN управление полевыми игроками в режиме PlayOn
-    // =======================================================================
     if (world().gameMode().type() == GameMode::PlayOn) {
 
         initVDNIfNeeded();
@@ -558,9 +537,7 @@ void SamplePlayer::actionImpl()
 
         bool done = (wm.time().cycle() >= M_match_end_cycle - 2);
 
-        // -------------------------------------------------------------------
         // Определяем нужно ли выбирать новое макро-действие
-        // -------------------------------------------------------------------
         bool macro_expired = M_macro_active
             && (isMacroActionDone(wm)
                 || M_macro_action_timer >= getMaxTau(M_current_macro_action));
@@ -601,7 +578,7 @@ void SamplePlayer::actionImpl()
             M_macro_action_timer = 0;
             M_macro_active       = true;
 
-            // --- Коммуникация: форвард слушает сигнал паса ---
+            // Коммуникация: форвард слушает сигнал паса
             {
                 const int aid = M_vdn_bridge->agentId();
                 if (aid >= 10) {
@@ -625,7 +602,7 @@ void SamplePlayer::actionImpl()
                 }
             }
 
-            // --- Ролевые ограничения (Action Masking) ---
+            //Ролевые ограничения 
             {
                 const int    aid      = M_vdn_bridge->agentId();
                 const double ball_x   = wm.ball().pos().x;
@@ -682,9 +659,7 @@ void SamplePlayer::actionImpl()
         return;
     }
 
-    // =======================================================================
     // Прочие режимы
-    // =======================================================================
     if (world().gameMode().isPenaltyKickMode()) {
         dlog.addText(Logger::TEAM, __FILE__": penalty kick");
         Bhv_PenaltyKick().execute(this);
@@ -693,8 +668,6 @@ void SamplePlayer::actionImpl()
 
     Bhv_SetPlay().execute(this);
 }
-
-// ---------------------------------------------------------------------------
 
 void SamplePlayer::handleActionStart()  {}
 void SamplePlayer::handlePlayerType()   {}
@@ -731,12 +704,12 @@ void SamplePlayer::handleActionEnd()
     }
 }
 
-// ---------------------------------------------------------------------------
-
 void SamplePlayer::handleInitMessage()
 {
     std::vector<int> pk_order = {10, 9, 2, 11, 3, 4, 1, 5, 6, 7, 8};
     M_worldmodel.setPenaltyKickTakerOrder(pk_order);
+
+    initVDNIfNeeded();
 }
 
 void SamplePlayer::handleServerParam()
@@ -765,8 +738,6 @@ void SamplePlayer::communicationImpl()
 {
     if (M_communication) M_communication->execute(this);
 }
-
-// ---------------------------------------------------------------------------
 
 bool SamplePlayer::doPreprocess()
 {
@@ -878,8 +849,6 @@ bool SamplePlayer::doHeardPassReceive()
         0.9, 5, wm.time()));
     return true;
 }
-
-// ---------------------------------------------------------------------------
 
 FieldEvaluator::ConstPtr SamplePlayer::getFieldEvaluator() const
 {

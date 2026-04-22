@@ -40,7 +40,7 @@ private:
     std::vector<double>  M_last_state;
     int                  M_last_action;
     bool                 M_macro_active;
-    bool                 M_first_action;      // ещё не выбрали первое действие
+    bool                 M_first_action;
     std::array<int, 8>   M_max_tau_by_action{{10, 10, 20, 10, 15, 30, 20, 40}};
     int                  M_match_end_cycle = 6000;
     bool                 M_episode_finalized = false;
