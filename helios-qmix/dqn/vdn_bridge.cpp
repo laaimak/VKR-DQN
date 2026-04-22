@@ -12,21 +12,17 @@
 
 namespace py = pybind11;
 
-// ─── Глобальный Python интерпретатор (для inference mode) ────────────────────
-// Один на процесс, как в IQL
+// Глобальный Python интерпретатор (для inference mode)
 static py::scoped_interpreter* g_interpreter = nullptr;
 static py::object               g_agent_obj;   // экземпляр DQNAgent
 
 bool VDNBridge::isPythonStarted() { return g_interpreter != nullptr; }
 
-// ─── libcurl callback ─────────────────────────────────────────────────────────
 static size_t writeCallback(char* ptr, size_t size, size_t nmemb, std::string* data)
 {
     data->append(ptr, size * nmemb);
     return size * nmemb;
 }
-
-// ─── VDNBridge constructor ────────────────────────────────────────────────────
 
 VDNBridge::VDNBridge(int agent_id,
                      const std::string& config_path,
@@ -59,16 +55,13 @@ VDNBridge::~VDNBridge()
     if (M_mode == Mode::TRAIN) {
         curl_global_cleanup();
     } else {
-        // pybind11 teardown на macOS вызывает recursive_mutex crash.
-        // Если интерпретатор был создан — уходим через _Exit.
+
         if (g_interpreter) {
             std::fflush(nullptr);
             std::_Exit(0);
         }
     }
 }
-
-// ─── reset ────────────────────────────────────────────────────────────────────
 
 int VDNBridge::reset(const std::vector<double>& state)
 {
@@ -85,8 +78,6 @@ int VDNBridge::reset(const std::vector<double>& state)
         return 6;
     }
 }
-
-// ─── step ─────────────────────────────────────────────────────────────────────
 
 int VDNBridge::step(const std::vector<double>& state,
                     double reward, bool done)
@@ -114,7 +105,7 @@ int VDNBridge::selectAction(const std::vector<double>& state)
     return step(state, 0.0, false);
 }
 
-// ─── INFERENCE MODE: локальная Q-сеть ────────────────────────────────────────
+// INFERENCE MODE: локальная Q-сеть
 
 void VDNBridge::initPython()
 {
@@ -137,7 +128,6 @@ void VDNBridge::initPython()
         );
 
         // Загружаем VDN веса для этого агента.
-        // Приоритет: VDN_WEIGHTS_DIR из env → дефолтный путь в logs/
         const char* weights_dir_env = std::getenv("VDN_WEIGHTS_DIR");
         std::string weights_path = weights_dir_env
             ? (std::string(weights_dir_env) + "/vdn_agent_" + std::to_string(M_agent_id) + ".pth")
@@ -167,7 +157,6 @@ int VDNBridge::localSelectAction(const std::vector<double>& state)
     try {
         py::gil_scoped_acquire acquire;
         // epsilon=0 при инференсе — всегда жадная стратегия
-        // Временно форсируем epsilon=0 через переменную объекта
         g_agent_obj.attr("epsilon") = py::float_(0.0);
         std::vector<float> state_f(state.begin(), state.end());
         py::object action = g_agent_obj.attr("act")(state_f);
@@ -178,7 +167,7 @@ int VDNBridge::localSelectAction(const std::vector<double>& state)
     }
 }
 
-// ─── HTTP POST (train mode) ───────────────────────────────────────────────────
+// HTTP POST (train mode)
 
 std::string VDNBridge::httpPost(const std::string& path,
                                 const std::string& json_body)
@@ -210,8 +199,6 @@ std::string VDNBridge::httpPost(const std::string& path,
     return response;
 }
 
-// ─── JSON builders ────────────────────────────────────────────────────────────
-
 std::string VDNBridge::buildResetJson(const std::vector<double>& state) const
 {
     std::ostringstream oss;
@@ -239,8 +226,6 @@ std::string VDNBridge::buildStepJson(const std::vector<double>& state,
     oss << "]}";
     return oss.str();
 }
-
-// ─── JSON parsers ─────────────────────────────────────────────────────────────
 
 int VDNBridge::parseAction(const std::string& json) const
 {
