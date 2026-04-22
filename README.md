@@ -12,6 +12,37 @@
 
 ---
 
+## Запуск
+
+### Зависимости
+
+- Python 3 + PyTorch  
+- RoboCup Soccer Simulator (rcssserver)  
+- C++ (helios/sample_player)  
+- Flask  
+- pybind11  
+
+---
+
+### Сборка
+
+```bash
+mkdir build && cd build
+cmake ..
+make -j4
+```
+
+### Обучение агента
+
+```bash
+train_vdn.sh 200
+```
+
+### Запуск обученной модели
+```bash
+./play_vdn_vs_starter.sh
+```
+
 ## Архитектура
 
 ```
@@ -148,38 +179,3 @@ VKR-DQN/
 ```
 
 ---
-
-
----
-
-## Запуск
-
-### Зависимости
-
-- Python 3 + PyTorch  
-- RoboCup Soccer Simulator (rcssserver)  
-- C++ (helios/sample_player)  
-- Flask  
-- pybind11  
-
----
-
-### Сборка
-
-```bash
-mkdir build && cd build
-cmake ..
-make -j4
-```
-
-### Обучение агента
-
-```bash
-train_vdn.sh 200
-```
-
-### Запуск обученной модели
-```bash
-bash play_vdn_vs_starter.sh
-```
-
